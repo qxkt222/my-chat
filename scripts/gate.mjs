@@ -267,10 +267,25 @@ const GATES = {
     desc: "lint 断言:0 错误且告警数不超基线",
     run: () => {
       const r = capture(NODE, [BIN.eslint, "src/**/*.{ts,tsx}"]);
-      const errM = r.text.match(/(\d+)\s+errors?/i);
-      const warnM = r.text.match(/(\d+)\s+warnings?/i);
-      const errors = errM ? Number(errM[1]) : r.status === 0 ? 0 : NaN;
-      const warnings = warnM ? Number(warnM[1]) : 0;
+      // ⚠️ 只认汇总行,不能随便抓「数字 + warning」:
+      //    ESLint 每条形如 "  297:5  warning  ...",用 /(\d+)\s+warnings?/ 会
+      //    先匹配到行:列里的列号(297:5 → "5  warning"),把 4 条告警误读成 5 条。
+      //    此坑已实测踩过:闸门报了假红,而真实读数自始至终是 4。
+      //    假红与假绿同样有害 —— 闸门必须读数准。
+      let errors = NaN;
+      let warnings = NaN;
+      const sum = r.text.match(
+        /(\d+)\s+problems?\s*\(\s*(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\s*\)/i,
+      );
+      if (sum) {
+        errors = Number(sum[2]);
+        warnings = Number(sum[3]);
+      } else {
+        // 回退:按「行:列  级别」的行首形态逐行计数
+        const lines = r.text.split("\n");
+        errors = lines.filter((l) => /^\s*\d+:\d+\s+error\b/.test(l)).length;
+        warnings = lines.filter((l) => /^\s*\d+:\d+\s+warning\b/.test(l)).length;
+      }
       console.log(`  errors=${errors} warnings=${warnings}`);
       check(errors === BASELINE.lintErrors, `错误数 == ${BASELINE.lintErrors}`, `实测 ${errors}`);
       check(
