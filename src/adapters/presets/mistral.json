@@ -1,0 +1,21 @@
+{
+  "id": "preset-mistral",
+  "name": "Mistral AI",
+  "mode": "simple",
+  "api_url": "https://api.mistral.ai",
+  "request_method": "POST",
+  "request_headers": {
+    "Authorization": "Bearer {{api_key}}",
+    "Content-Type": "application/json"
+  },
+  "request_body_template": "{\n  \"model\": \"{{model}}\",\n  \"messages\": {{messages}},\n  \"temperature\": {{temperature}},\n  \"stream\": true\n}",
+  "sse_enabled": true,
+  "sse_data_prefix": "data: ",
+  "sse_done_marker": "[DONE]",
+  "sse_content_path": "$.choices[0].delta.content",
+  "response_content_path": "$.choices[0].message.content",
+  "pre_script": "",
+  "parse_script": "",
+  "category": "Official",
+  "is_preset": true
+}
