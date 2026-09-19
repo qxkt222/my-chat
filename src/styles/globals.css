@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 迁移:
+   ① CSS 入口由三条 @tailwind 指令改为单条 @import "tailwindcss"。
+   ② 用 @config 保留原有 tailwind.config.ts —— 主题色板、borderRadius 覆写、动画
+      全部沿用。这点很关键:本项目的 borderRadius.sm 被显式覆写为
+      calc(var(--radius) - 4px),若改走 v4 的默认值会直接变形。
+   ③ darkMode:"class" 在 v4 中改为 @custom-variant 声明。 */
+@import "tailwindcss";
+@config "../../tailwind.config.ts";
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ── Light theme (default) — 蓝灰扁平规范 ──────────────── */
 /* 主色板：科技蓝 #1A6FB5 / 冷灰 #E8ECF0 / 灰字 #8899A6 / 底 #F2F3F5 / 主字 #2C3E50 */
