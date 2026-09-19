@@ -17,3 +17,8 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# ── 测试/闸门产物 ─────────────────────────────────────
+.vitest-report.json
+src/.vitest-report.json
+.gate-tmp/
