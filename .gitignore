@@ -1,0 +1,19 @@
+# ── 依赖 ──────────────────────────────────────────────
+node_modules/
+# vite/vitest 会在 src/ 下写缓存(因为 vite.config.ts 里 root: "src")
+src/node_modules/
+
+# ── 构建产物 ──────────────────────────────────────────
+dist/
+# Rust 构建目录:本机实测已涨到 8.6 GB,绝不能进版本库
+src-tauri/target/
+
+# ── 编辑器 / 系统 ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+
+# ── 本地环境与凭据(项目会存 API key,虽然经 DPAPI 加密,仍不入库)──
+.env
+.env.local
+.env.*.local

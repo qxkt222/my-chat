@@ -1,0 +1,21 @@
+{
+  "id": "preset-gemini",
+  "name": "Google Gemini",
+  "mode": "medium",
+  "api_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  "request_method": "POST",
+  "request_headers": {
+    "Content-Type": "application/json",
+    "x-goog-api-key": "{{api_key}}"
+  },
+  "request_body_template": "{\n  \"contents\": [{\"parts\": [{\"text\": \"System: {{system_prompt}}\\nKnowledge: {{knowledge_context}}\\n\\nUser: {{messages}}\"}]}],\n  \"generationConfig\": {\n    \"temperature\": {{temperature}}\n  }\n}",
+  "sse_enabled": true,
+  "sse_data_prefix": "",
+  "sse_done_marker": "",
+  "sse_content_path": "$.candidates[0].content.parts[0].text",
+  "response_content_path": "$.candidates[0].content.parts[0].text",
+  "pre_script": "",
+  "parse_script": "",
+  "category": "Official",
+  "is_preset": true
+}
