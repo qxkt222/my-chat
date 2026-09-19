@@ -417,3 +417,117 @@
 4. **二进制排障**：sled db 是明文 JSON 存储，`strings -a -n 8 db` 可直接提取记录排查
 5. **SearXNG 搜索空结果**：本机 SearXNG（`D:\1233344\search-stack`）直连会被搜索引擎 CAPTCHA/429 拦截 → `searxng-local-settings.yml` 的 `outgoing.proxies` 配了 `http://127.0.0.1:23385`（飞鸟代理）。**必须先开代理再启动** `start-searxng.bat`，代理没开会搜不到；配置已备份（`*.yml.bak-*`）
 6. **PNG 角色卡导入失败**：确认卡是 V2/V3 格式（文件尾含 `chara_card_v2`/`chara_card_v3` 魔数）；老 tEXt 块卡（keyword=`chara`）有兜底但拿不到头像；解析是纯前端逻辑（`src/lib/character-card.ts`），可用临时脚本按同算法测 base64 样本
+
+---
+
+## 七、大版本现代化轮（2026-09-19，实测驱动）
+
+> 本轮把项目从荒废状态恢复到「有版本控制 + 有可证伪闸门 + 依赖现代化」。
+> **重要：本文档此前存在虚报，段末有订正表，请以那段为准。**
+
+### 7.1 起点体检（全部实测，非推断）
+
+| 项 | 实测 |
+|---|---|
+| 前端规模 | 108 个源文件 / 23,175 行（49 `.tsx` + 59 `.ts`）|
+| Rust 规模 | 29 个 `.rs` / 4,872 行 |
+| `tsc --noEmit` | 0 错误（`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` 全开）|
+| `vitest` | 34/34 通过（6 文件）|
+| `eslint` | 0 错误 / **4 告警** |
+| `vite build` | 通过，主 chunk 682.97 kB（gzip 199.78 kB）|
+| `cargo check --all-targets` | 338 crates，0 错 0 警，1m31s |
+| `cargo test` | **12 passed / 0 failed** |
+| `cargo clippy`（默认）| 0 警告 |
+| `cargo clippy --all-targets` | **2 警告**（测试代码，见 7.5）|
+| 版本控制 | **无 git 仓库**，`src-tauri/target` 达 8.6 GB 裸露在源码树中 |
+
+### 7.2 补上版本控制（第一件事）
+
+升级前先建回滚点 —— 零版本控制的项目做现代化改造是裸奔。
+
+- `git init` + `.gitignore`（排除 `node_modules/`、`dist/`、`src-tauri/target/`、`src/node_modules/`、`.env*`）
+- 基线提交 232 文件 → 并入远端 `Initial commit`（保留 LICENSE/README）后 **234 文件**
+- **8.6 GB 的 `target/` 与 `node_modules` 零入索引**
+- 已推送：`github.com/qxkt222/my-chat`
+
+### 7.3 依赖现代化（5 批，逐批过闸）
+
+| 批次 | 升级内容 | 提交 |
+|---|---|---|
+| 1 | zustand 4.5.7→5.0.15 · marked 12→18 · react-markdown 9→10 · tailwind-merge 2→3 · lucide-react 0.400→1.47 | `3c06449` |
+| 2 | eslint 9.39.5→**10.11.0** · @typescript-eslint 8.64→8.70 · radix ×7 及包内小版本 | `26cb4a5` |
+| 3 | react/react-dom/@types 18.3.x→**19.3.0** | `e43b4b6` |
+| 4 | vite 5.4.21→**8.3.0** · @vitejs/plugin-react 4→6.1.1 · vitest 4.1.10→**5.0.1** | `cba5bf7` |
+| 5 | tailwindcss 3.4.19→**4.3.3** | `a46bfdb` |
+
+**关键依赖关系（实测 peer，不是猜的）**
+- `vitest@5` 的 peer 是 `vite ^6.4 || ^7 || ^8` —— **它不支持 vite 5**,所以 vitest 5 必须与 vite 8 同批。
+- `@vitejs/plugin-react@6` 要求 `vite ^8`;其三个额外 peer（`oxc-transform-react` /
+  `@rolldown/plugin-babel` / `babel-plugin-react-compiler`）在 `peerDependenciesMeta` 里
+  标了 `optional: true`,实测未引入,**不属缺失**。
+
+**改代码量:几乎为零。** React 19 与 Vite 8 都是**配置零改动**通过 ——
+项目原本就没踩雷(入口已用 `createRoot`,全库 0 处 `defaultProps`/`propTypes`/
+`findDOMNode`/string ref)。唯一实质迁移是 Tailwind 4。
+
+### 7.4 Tailwind 4 迁移要点
+
+改了两个文件:`src/styles/globals.css` 与 `postcss.config.js`。
+
+- `@tailwind base/components/utilities` → `@import "tailwindcss"`
+- `tailwindcss` PostCSS 插件 → `@tailwindcss/postcss`,并**移除 autoprefixer**
+  (v4 内建 Lightning CSS 处理前缀,继续挂会重复处理)
+- `darkMode: "class"` → `@custom-variant dark (&:where(.dark, .dark *))`
+
+**关键判断:没有改写成 CSS-first 的 `@theme`,而是用 `@config "../../tailwind.config.ts"` 保留原 JS 配置。**
+理由:本项目 `borderRadius` 被显式覆写(`sm: calc(var(--radius) - 4px)` 等),
+若按 v4 默认值重写,圆角会整体变形。产物实测确认保留成功:
+`.rounded-sm{border-radius:calc(var(--radius) - 4px)}`
+
+排查记录:`dark` 变体在产物中**未生成**(`:where(.dark` 出现 0 次),但实测源码里
+`dark:` 工具类使用量为 **0** —— 本项目暗色完全靠 CSS 变量切换
+(`:root` ↔ `.dark`,`App.tsx:34-43` 切 `documentElement` 的类名),
+两个变量块均完整保留,故该变体不生成**不影响任何东西**。
+
+副作用:CSS 由 27.90 kB 增至 41 kB(+47%,gzip 6.55→8.26 kB),属 v4 preflight 与
+工具类生成策略变大所致,非配置泄漏。
+
+### 7.5 遗留:Rust 侧 2 条 clippy 告警（未修,已定位）
+
+只出现在 `--all-targets`（含测试目标）下,默认 `cargo clippy` 为 0 警告:
+
+- `src/db/migration.rs:293` —— `map(<f>).unwrap_or(false)`,建议 `is_some_and`
+- `src/rag/search.rs:226` —— `assert!` 用于相等比较,建议 `assert_eq!`
+
+### 7.6 为什么不升 TypeScript 7（实测证据否决）
+
+```
+$ npm view @typescript-eslint/parser@8.70.0 peerDependencies
+{ eslint: '^8.57.0 || ^9.0.0 || ^10.0.0',
+  typescript: '>=4.8.4 <6.1.0' }        # ← 不含 7.x
+```
+
+且 TS 无稳定版 6：`dist-tags` 中 `beta: 6.0.0-beta`,`latest` 从 5.9 直跳 7.0.2。
+升级会让 typescript-eslint 超出 peer 范围,**静默废掉 `strict-type-checked` lint 闸**。
+故停在 5.9.3,待上游支持 TS 7 后再评估。
+
+### 7.7 本文档数字订正表（重要）
+
+本文档前文（一~六节）存在与实测不符之处,以下为订正后的事实:
+
+| 前文声称 | 实测 | 说明 |
+|---|---|---|
+| 「eslint **0 警告**」 | **4 告警**（0 错误）| 4 条为 2 个缺失 hook 依赖 + 2 个死导入 |
+| 「npm test **24/24**」 | **34/34**（6 文件）| rp-prompt 测试扩充后未同步 |
+| 「cargo test 12/12」 | **12 passed / 0 failed** | ✅ 属实 |
+| 「clippy 0 警告」 | 默认 0 / `--all-targets` **2** | 说法范围比字面窄,非虚报但易误导 |
+
+**教训:文档里的验证数字必须由当场实测产出,不能靠上一轮的记录转抄。**
+
+### 7.8 已知风险 / 后续
+
+- **49 个 React 组件仍无自动化测试**。本次大版本升级的 UI 验证靠
+  浏览器截图 + DOM 文本对比(`audit-shot-01~05*.png`),不是机器化回归。
+  这是当前最大的质量缺口,建议下一步补 jsdom + 组件冒烟测试。
+- `useTavernStore.ts` 1648 行、`i18n.ts` 1227 行,后续可考虑拆分。
+- 10 处 `.catch(() => {})` 静默吞异常,与本文档第六节「优先读日志」的准则相冲突。
