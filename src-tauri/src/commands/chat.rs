@@ -99,10 +99,6 @@ pub struct ApiTemplateDto {
     pub sse_content_path: String,
     #[serde(default)]
     pub response_content_path: String,
-    #[serde(default)]
-    pub pre_script: String,
-    #[serde(default)]
-    pub parse_script: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -179,7 +175,7 @@ pub async fn stream_chat(app: AppHandle, request: ChatRequest) -> Result<(), Str
                 build_api_url(&request.model_config.api_url),
                 request.model_config.model,
                 request.model_config.name,
-                e
+                clip(&e, 2048)
             ));
             Err(e)
         }
@@ -339,7 +335,8 @@ async fn stream_chat_inner(app: &AppHandle, request: &ChatRequest) -> Result<(),
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API error {status}: {text}"));
+        // 上游错误页可能很大，截断后再回传（完整原文不再进 UI 与日志）
+        return Err(format!("API error {status}: {}", clip(&text, 2048)));
     }
 
     let adapter = AdapterConfig::openai_compatible();
@@ -477,7 +474,8 @@ async fn stream_via_template(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API error {status}: {text}"));
+        // 模板路径同形，同样先截断
+        return Err(format!("API error {status}: {}", clip(&text, 2048)));
     }
 
     if tpl.sse_enabled {
@@ -665,10 +663,27 @@ fn extract_reasoning(line: &str) -> String {
     String::new()
 }
 
+/// 截断过长文本（上游 4xx/5xx 常返回整页 HTML，动辄几百 KB），
+/// 避免把整页塞进 UI 与 `chat_errors.log`。
+/// 按字符边界截，不会切出半个 UTF-8 字符。
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…（已截断，原文 {} 字节）", &s[..end], s.len())
+}
+
 /// Append a line to `chat_errors.log` (diagnostics for failures that don't
 /// surface a useful message in the UI). Writes to both %APPDATA%\com.my-chat
 /// and the directory next to the exe, so at least one copy always lands.
-fn log_chat_error(msg: &str) {
+///
+/// `pub(crate)`：路径守卫（main.rs）与加密层（db/encryption.rs）也要用它落盘——
+/// 失败静默正是本轮要修的毛病。
+pub(crate) fn log_chat_error(msg: &str) {
     use std::io::Write;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -696,5 +711,21 @@ fn log_chat_error(msg: &str) {
         {
             let _ = f.write_all(line.as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::clip;
+
+    #[test]
+    fn clip_truncates_on_char_boundary_and_keeps_short_text() {
+        assert_eq!(clip("short", 2048), "short", "短文本应原样返回");
+
+        let long = "错误".repeat(2000); // 6000 字节，远超前限
+        let out = clip(&long, 2048);
+        assert!(out.len() < long.len(), "超长文本应被截断");
+        assert!(out.contains("已截断"), "应标注已截断");
+        assert!(out.starts_with('错'), "按字符边界截，不应切碎中文");
     }
 }

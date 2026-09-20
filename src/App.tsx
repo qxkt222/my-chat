@@ -66,7 +66,10 @@ export default function App() {
       (window as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback ||
       ((cb: () => void) => setTimeout(cb, 3000));
     idle(() => {
-      import("./components/chat/MessageRenderer").catch(() => {});
+      import("./components/chat/MessageRenderer").catch(() => {
+        // 有意静默：空闲预加载失败不影响任何功能——真正渲染时会再 import 一次，
+        // 那次失败有 ErrorBoundary 与错误横幅接着。写日志反而会淹没 chat_errors.log。
+      });
     });
   }, []);
 

@@ -95,8 +95,6 @@ export const useAdapterStore = create<AdapterState>((set, get) => ({
         sse_done_marker: template.sse_done_marker,
         sse_content_path: template.sse_content_path,
         response_content_path: template.response_content_path,
-        pre_script: template.pre_script,
-        parse_script: template.parse_script,
         category: template.category,
         is_preset: false,
       });

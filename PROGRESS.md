@@ -434,7 +434,7 @@
 | `tsc --noEmit` | 0 错误（`strict` + `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` 全开）|
 | `vitest` | 34/34 通过（6 文件）|
 | `eslint` | 0 错误 / **4 告警** |
-| `vite build` | 通过，主 chunk 682.97 kB（gzip 199.78 kB）|
+| `vite build` | 通过，主 chunk 682.97 kB（gzip 199.78 kB）——⚠ 2026-09-20 复测已涨到 **777.49 kB（gzip 217.35 kB）**，见 §7.9 |
 | `cargo check --all-targets` | 338 crates，0 错 0 警，1m31s |
 | `cargo test` | **12 passed / 0 failed** |
 | `cargo clippy`（默认）| 0 警告 |
@@ -531,3 +531,44 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
   这是当前最大的质量缺口,建议下一步补 jsdom + 组件冒烟测试。
 - `useTavernStore.ts` 1648 行、`i18n.ts` 1227 行,后续可考虑拆分。
 - 10 处 `.catch(() => {})` 静默吞异常,与本文档第六节「优先读日志」的准则相冲突。
+
+---
+
+### 7.9 审查修复轮（2026-09-20，实测驱动）
+
+> 由一次外部审查驱动（报告在仓库外 `D:/1233344/my-chat-audit/REVIEW-my-chat.md`），分六批实施，
+> **每批都过 `node scripts/gate.mjs all` 才进入下一批**。本节数字全部当场实测。
+
+**批次与读数**
+
+| 批 | 内容 | 验证读数 |
+|---|---|---|
+| B1 | `scripts/gate.mjs` 的 `rust-clippy` 补上 `-- -D warnings`（此前警告不改退出码 = 假绿）；清 pedantic 两条 | 严格模式 **exit 101 → 0**；并做负对照证明闸门真会红 |
+| B2 | 新增 `guard_path`：5 个写/删类 IPC 命令加根目录守卫（`read_file`/`read_file_bytes` **故意不设限**——它们要读用户在文件对话框里选的文件，限制会废掉导入功能）；`encryption::encrypt/decrypt` 改 `Result` + 失败落盘日志 | `cargo test` **12 → 17** |
+| B4 | 移除空转的适配器脚本链（`adapters/engine.ts` 死代码 + `ScriptEditor` + 16 个预设字段 + Rust DTO 字段）；上游错误文本截断 2 KB；外链接 `opener`、删空转的 `plugin-shell` | `plugin-shell` 全仓 **0 命中** |
+| B5 | 装 jsdom + `@testing-library/react`，`test.include` 从 `lib/**/*.test.ts` 放开到 `**/*.test.{ts,tsx}`；补 3 个组件冒烟 | vitest **34 → 44** |
+| B6 | 10 处静默 catch 分类处理（该吞/该记/该提示）、8 处 `console.*` 收口到 `logDiag`、删 10 个死依赖、恢复 2 条 `no-unsafe-*` | 静默 catch / console **归零**；eslint 告警回基线 4 |
+| B7 | `i18n.ts`（1227 行）按 key 前缀拆成 6 组 + `index.ts` | **666 个 key 一条不丢**；最大文件 1227 → 396 行 |
+
+**顺带发现并修掉的真缺陷**（都不是「代码风格」问题）
+
+1. **代码块渲染是坏的** —— `rehype-highlight` 把代码内容换成元素数组后，`String(children)` 让它渲染成
+   `[object Object], a = ,[object Object],;`；同时 `CodeBlock` 用纯文本渲染，把语法高亮整个丢掉。
+   **被 B5 新加的组件测试当场抓到**——此前 47 个组件零自动化测试，谁也没看见。
+2. **`SkillManager` 遇到坏 JSON 会白屏** —— `JSON.parse(skill.tools_json || "[]").length` 在渲染期抛异常，
+   整块技能列表跟着崩。恢复 `no-unsafe-*` 后立刻暴露，已改成 `parseJsonArray()` 安全降级。
+3. **`JSON.parse` 的 `any` 在 4 个文件里传播**（`lib/model-presets.ts` / `stores/useSettingsStore.ts` /
+   `lib/character-card.test.ts` / `components/skills/SkillManager.tsx`），共 15 处，全部类型化。
+
+**数字口径约定**（本轮两次「差一点」都出在这里，此后按此记）
+
+- **行数**：`split("\n").length` = `wc -l` **+1**（有无尾随换行之别）；引用时写明口径。
+- **体积**：vite 报的是**十进制 kB**，`statSync().size / 1024` 得的是 **KiB**，两者差 2.4%。
+- **Rust 文件数**：29 = `src/**.rs` 28 + 根目录 `build.rs` 1。
+- **`cargo clippy` 默认警告不改退出码**：读数必须带 `-- -D warnings`，否则报的「0 警告」是假绿。
+
+**未做**（留给后续，属需评估项）
+
+- `useTavernStore.ts`(1649) / `TavernView.tsx`(1057) / `ChatInput.tsx`(949) / `SimulationView.tsx`(908) /
+  `useChatStore.ts`(752) 的拆分（§5.1 只完成了第 1 步 i18n）。
+- `csp: null` 与 `assetProtocol.scope: ["**"]` 的收紧 —— 开发者判断本项目不做公网部署、威胁模型不成立，主动跳过。

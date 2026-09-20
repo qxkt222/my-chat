@@ -12,6 +12,23 @@ interface EditState extends Partial<Skill> {
   memoryTags: string[];
 }
 
+/**
+ * 安全解析持久化的 JSON 数组字段。
+ *
+ * 旧写法直接 `JSON.parse(skill.tools_json || "[]").length` —— 存进去的是坏 JSON 时
+ * （手改过 sled / 迁移出过岔子）会在**渲染期抛异常，整块技能列表跟着白屏**；
+ * 顺带它返回 `any`，把类型闸门也一起废掉了（恢复 no-unsafe-* 后立刻被抓住）。
+ */
+function parseJsonArray(raw: string | undefined): unknown[] {
+  try {
+    const v: unknown = JSON.parse(raw || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch {
+    // 有意吞掉：坏数据降级成「没有」，比让界面崩掉好
+    return [];
+  }
+}
+
 export function SkillManager() {
   const t = useT();
   const skills = useSkillStore((s) => s.skills);
@@ -123,16 +140,16 @@ export function SkillManager() {
               <p className="text-xs text-muted-foreground truncate">{skill.description}</p>
               <div className="flex gap-2 mt-0.5 text-[10px] text-muted-foreground">
                 {skill.model && <span>{skill.model}</span>}
-                {JSON.parse(skill.tools_json || "[]").length > 0 && (
+                {parseJsonArray(skill.tools_json).length > 0 && (
                   <span className="flex items-center gap-0.5">
                     <Puzzle className="w-2.5 h-2.5" />{" "}
-                    {t("skills.toolsCount", { n: JSON.parse(skill.tools_json || "[]").length })}
+                    {t("skills.toolsCount", { n: parseJsonArray(skill.tools_json).length })}
                   </span>
                 )}
-                {JSON.parse(skill.memory_tags || "[]").length > 0 && (
+                {parseJsonArray(skill.memory_tags).length > 0 && (
                   <span className="flex items-center gap-0.5">
                     <Brain className="w-2.5 h-2.5" />{" "}
-                    {JSON.parse(skill.memory_tags || "[]").join("、")}
+                    {parseJsonArray(skill.memory_tags).join("、")}
                   </span>
                 )}
               </div>

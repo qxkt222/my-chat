@@ -47,19 +47,29 @@ export async function fetchModelsFromAPI(apiUrl: string, apiKey: string): Promis
 // Cache: localStorage key
 const CACHE_KEY = "fetched_models_cache";
 
+/** 缓存结构 —— 显式声明，避免 JSON.parse 的 any 一路传播（no-unsafe-member-access） */
+interface FetchedModelsCache {
+  [provider: string]: { models: string[]; ts: number } | undefined;
+}
+
 export function getCachedModels(provider: string): string[] | null {
   try {
-    const cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}");
+    const cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") as FetchedModelsCache;
     const entry = cache[provider];
     if (entry && Date.now() - entry.ts < 86400000) return entry.models; // 24h cache
-  } catch {}
+  } catch {
+    // 有意静默：缓存不是功能。localStorage 被禁用（隐私模式）或缓存 JSON 坏了，
+    // 降级成「没有缓存」即可，调用方会去远端重新拉一次。
+  }
   return null;
 }
 
 export function setCachedModels(provider: string, models: string[]) {
   try {
-    const cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}");
+    const cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}") as FetchedModelsCache;
     cache[provider] = { models, ts: Date.now() };
     localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-  } catch {}
+  } catch {
+    // 有意静默：写缓存失败（配额满 / 禁用）只影响下次是否复用，功能不受影响。
+  }
 }

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Message, ChatRequest, ModelConfig } from "@/types";
-import { streamChat, cancelChat, classifyError } from "@/lib/tauri";
+import { streamChat, cancelChat, classifyError, logDiag } from "@/lib/tauri";
 import { budgetFor, shrinkMessages } from "@/lib/context-budget";
 import { showToast } from "@/components/ui/Toast";
 import { t } from "@/lib/i18n";
@@ -482,7 +482,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             finish();
           },
           onError: (err) => {
-            console.error(`Chat error (${modelName}):`, err);
+            logDiag(`Chat error (${modelName}): ${String(err)}`);
             const raw = typeof err === "string" ? err : String(err ?? "");
             const classified = classifyError(raw);
             const short = (raw || t("chat.unknownError")).slice(0, 300);
@@ -634,7 +634,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           },
           onDone: done,
           onError: (e) => {
-            console.error("compress err:", e);
+            logDiag(`compress err: ${String(e)}`);
             done();
           },
         }

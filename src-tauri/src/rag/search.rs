@@ -223,7 +223,8 @@ mod tests {
             chunk("c2", "香蕉 橙子 梨子 西瓜 葡萄"),
         ];
         let r = keyword_search(&chunks, "苹果", 2);
-        assert!(r[0].0 == "c1");
+        // clippy::manual_assert_eq —— 用 assert_eq! 失败时能打印两侧实际值
+        assert_eq!(r[0].0, "c1");
     }
 
     fn chunk(id: &str, content: &str) -> KnowledgeChunk {

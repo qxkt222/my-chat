@@ -60,8 +60,11 @@ describe("toExportJson", () => {
       data: { name: "X", description: "y", depth_prompt: { depth: 5, prompt: "第五轮注入" } },
     });
     const card = parseCharacterJson(v3);
-    const out = JSON.parse(toExportJson(card as never));
-    expect(out.data.depth_prompt?.depth).toBe(5);
-    expect(out.data.depth_prompt?.prompt).toBe("第五轮注入");
+    // 显式断言导出结构：JSON.parse 返回 any，不标注就会让 no-unsafe-member-access 报警
+    const out = JSON.parse(toExportJson(card as never)) as {
+      data?: { depth_prompt?: { depth?: number; prompt?: string } };
+    };
+    expect(out.data?.depth_prompt?.depth).toBe(5);
+    expect(out.data?.depth_prompt?.prompt).toBe("第五轮注入");
   });
 });

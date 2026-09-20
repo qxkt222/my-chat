@@ -190,8 +190,12 @@ const GATES = {
   },
   "rust-test": { desc: "cargo test", run: () => step(CARGO, ["test"], "src-tauri") },
   "rust-clippy": {
-    desc: "cargo clippy --all-targets(pedantic)",
-    run: () => step(CARGO, ["clippy", "--all-targets"], "src-tauri"),
+    // ⚠️ 必须带 `-- -D warnings`：cargo clippy 的警告默认**不改退出码**，
+    //    只传 --all-targets 时即使有告警也会 exit 0 —— 那是假绿。
+    //    实测证据（2026-09-19）：同一份代码无参 exit 0，加 -- -D warnings exit 101。
+    //    假绿与假红同样有害，闸门必须读数准。
+    desc: "cargo clippy --all-targets（pedantic，警告即失败）",
+    run: () => step(CARGO, ["clippy", "--all-targets", "--", "-D", "warnings"], "src-tauri"),
   },
 
   // ── 行为型断言闸门:真跑 + 读数 + 核对期望值 ──────────────

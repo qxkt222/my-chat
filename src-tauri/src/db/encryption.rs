@@ -94,25 +94,67 @@ mod win {
     }
 }
 
-pub fn encrypt(plaintext: &str) -> String {
+/// 加密。失败返回 `Err` —— **绝不返回空串**。
+///
+/// 旧实现失败时返回 `String::new()`，调用方把空串当密文存下去，
+/// 用户的 API key 就这样无声消失了：界面上只表现成「认证失败」，
+/// 而真正的原因（DPAPI 失败）没有任何痕迹。换 Windows 账户或重装系统
+/// 后 DPAPI 解不开旧密文，正是最常见的触发场景。
+pub fn encrypt(plaintext: &str) -> Result<String, String> {
     if plaintext.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
-    match win::protect(plaintext.as_bytes()) {
-        Ok(enc) => STANDARD.encode(&enc),
-        Err(_) => String::new(),
-    }
+    win::protect(plaintext.as_bytes())
+        .map(|enc| STANDARD.encode(enc))
+        .map_err(|e| fail(&format!("DPAPI 加密失败（API key 未能保存）: {e}")))
 }
 
-pub fn decrypt(encoded: &str) -> String {
+/// 解密。失败返回 `Err` 并落盘日志；调用方决定怎么降级（当前降级为空 key）。
+pub fn decrypt(encoded: &str) -> Result<String, String> {
     if encoded.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
-    let Ok(bytes) = STANDARD.decode(encoded) else {
-        return String::new();
-    };
-    match win::unprotect(&bytes) {
-        Ok(dec) => String::from_utf8(dec).unwrap_or_default(),
-        Err(_) => String::new(),
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|e| fail(&format!("API key 密文不是合法 base64（该 key 需重新输入）: {e}")))?;
+    let dec = win::unprotect(&bytes).map_err(|e| {
+        fail(&format!(
+            "DPAPI 解密失败（换 Windows 账户或重装系统后旧密文解不开，该 key 需重新输入）: {e}"
+        ))
+    })?;
+    String::from_utf8(dec)
+        .map_err(|e| fail(&format!("API key 明文不是合法 UTF-8（该 key 需重新输入）: {e}")))
+}
+
+/// 失败统一落盘到 `chat_errors.log` —— 否则「key 没了」这件事查无可查。
+fn fail(msg: &str) -> String {
+    crate::commands::chat::log_chat_error(&format!("ENCRYPTION: {msg}"));
+    msg.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 空串直通 + 正常值 roundtrip（Windows 走真 DPAPI，其它平台走直通实现）。
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        assert_eq!(encrypt("").expect("空串应直通"), "");
+        assert_eq!(decrypt("").expect("空串应直通"), "");
+
+        let secret = "sk-test-1234567890";
+        let enc = encrypt(secret).expect("加密应成功");
+        assert!(!enc.starts_with("sk-"), "密文不应等于明文");
+        assert_eq!(decrypt(&enc).expect("解密应成功"), secret);
+    }
+
+    /// 坏密文必须返回 `Err`。
+    ///
+    /// 旧实现返回空串，让「解不开」与「本来就没有 key」在调用方看来一模一样——
+    /// 这正是本轮要修的那个「无声」。
+    #[test]
+    fn decrypt_rejects_bad_base64() {
+        let r = decrypt("!!!!not-base64!!!!");
+        assert!(r.is_err(), "坏 base64 应返回 Err，而不是静默空串");
     }
 }

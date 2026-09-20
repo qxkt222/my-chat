@@ -14,8 +14,6 @@
   "sse_done_marker": "",
   "sse_content_path": "$.candidates[0].content.parts[0].text",
   "response_content_path": "$.candidates[0].content.parts[0].text",
-  "pre_script": "",
-  "parse_script": "",
   "category": "Official",
   "is_preset": true
 }

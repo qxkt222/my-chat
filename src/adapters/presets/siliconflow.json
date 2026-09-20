@@ -14,8 +14,6 @@
   "sse_done_marker": "[DONE]",
   "sse_content_path": "$.choices[0].delta.content",
   "response_content_path": "$.choices[0].message.content",
-  "pre_script": "",
-  "parse_script": "",
   "category": "Domestic",
   "is_preset": true
 }
