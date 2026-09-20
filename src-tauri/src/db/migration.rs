@@ -290,10 +290,7 @@ mod tests {
         // 读回应有 embedding
         let raw = t.get(key("mem", "m1")).unwrap().unwrap();
         let updated: crate::db::memory::Memory = serde_json::from_slice(&raw).unwrap();
-        assert!(updated
-            .embedding
-            .as_ref()
-            .map(|b| b.len() >= 4)
-            .unwrap_or(false));
+        // clippy::map_unwrap_or —— is_some_and 对 None 同样返回 false，语义不变
+        assert!(updated.embedding.as_ref().is_some_and(|b| b.len() >= 4));
     }
 }

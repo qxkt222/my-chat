@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { TavernConversation, Message, ModelConfig } from "@/types";
 import { getAppDir, readFile, writeFile, listDir, deleteItem } from "@/lib/tauri";
-import { streamChat, cancelChat } from "@/lib/tauri";
+import { streamChat, cancelChat, logDiag } from "@/lib/tauri";
 import { useCharacterStore } from "./useCharacterStore";
 import { useSettingsStore } from "./useSettingsStore";
 import { useCacheStatsStore } from "./useCacheStatsStore";
@@ -493,7 +493,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       };
       await get().saveConv(updated);
     } catch (e) {
-      console.error("Tavern translate error:", e);
+      logDiag(`Tavern translate error: ${String(e)}`);
     } finally {
       set((s) => ({ translatingIds: s.translatingIds.filter((id) => id !== msgId) }));
     }
@@ -752,7 +752,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
             });
           },
           onError: (e) => {
-            console.error("Tavern chat error:", e);
+            logDiag(`Tavern chat error: ${String(e)}`);
             void finish(typeof e === "string" ? e : String(e ?? ""));
           },
         }
@@ -1571,7 +1571,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
             });
           },
           onError: (e) => {
-            console.error("Tavern group chat error:", e);
+            logDiag(`Tavern group chat error: ${String(e)}`);
             void finish(typeof e === "string" ? e : String(e ?? ""));
           },
         }

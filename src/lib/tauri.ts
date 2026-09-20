@@ -72,8 +72,7 @@ export async function streamChat(
   // can be read from chat_errors.log even when stream_chat never runs.
   const diag = (stage: string, e: unknown) => {
     const msg = `${stage} err=${JSON.stringify(String(e ?? "null"))} url=${request.model_config.api_url} model=${request.model_config.model}`;
-    console.error(msg);
-    invoke("log_diag", { message: msg }).catch(() => {});
+    logDiag(msg);
   };
 
   try {
@@ -94,9 +93,28 @@ export async function streamChat(
 }
 
 /** Cancel a specific stream (true abort: signals Rust + drops the listener) */
+/**
+ * 把一条诊断写进后端 `chat_errors.log`。
+ *
+ * 非流式路径（渲染层、导入导出等）没有 `streamChat` 内部那个 `diag` 可用，
+ * 需要一条公共通道 —— 否则这些地方只能 `console.error`，而 webview 的控制台
+ * 用户根本看不到，等于没记。
+ *
+ * 落盘失败就放弃（避免「记日志失败 → 再记日志」的递归）——这里是有意为之的静默。
+ */
+export function logDiag(message: string): void {
+  invoke("log_diag", { message }).catch(() => {
+    // 有意静默：这一层就是日志自身的出口，它失败时再记日志会无限递归。
+    // 全仓最后一处「空 catch」就是这里，且是唯一合理的一处。
+  });
+}
+
 export function cancelChat(requestId: string): void {
   streams.delete(requestId);
-  invoke("cancel_chat", { requestId }).catch(() => {});
+  invoke("cancel_chat", { requestId }).catch((e: unknown) => {
+    // 取消失败意味着那条流可能还在跑 —— 必须留痕，否则用户以为停了其实没停
+    logDiag(`cancel_chat failed: ${String(e)} request_id=${requestId}`);
+  });
 }
 
 // ── 错误分类（错误命名化）──────────────────────────────

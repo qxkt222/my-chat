@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Save } from "lucide-react";
 import { TemplateEditor } from "./TemplateEditor";
-import { ScriptEditor } from "./ScriptEditor";
 import { SseRuleBuilder } from "./SseRuleBuilder";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { ApiTemplate, AdapterMode } from "@/types";
@@ -31,8 +30,6 @@ export function AdapterForm({ initial, onSave, onCancel }: Props) {
   const [ssePrefix, setSsePrefix] = useState(initial?.sse_data_prefix || "data: ");
   const [sseDone, setSseDone] = useState(initial?.sse_done_marker || "[DONE]");
   const [ssePath, setSsePath] = useState(initial?.sse_content_path || "$.choices[0].delta.content");
-  const [preScript, setPreScript] = useState(initial?.pre_script || "");
-  const [parseScript, setParseScript] = useState(initial?.parse_script || "");
 
   const handleSave = () => {
     let headers: Record<string, string> = {};
@@ -54,8 +51,6 @@ export function AdapterForm({ initial, onSave, onCancel }: Props) {
       sse_done_marker: sseDone,
       sse_content_path: ssePath,
       response_content_path: "",
-      pre_script: preScript,
-      parse_script: parseScript,
       category: "",
       is_preset: false,
     });
@@ -162,18 +157,6 @@ export function AdapterForm({ initial, onSave, onCancel }: Props) {
 
           {mode === "advanced" && (
             <>
-              <ScriptEditor
-                title="Pre-request Script"
-                script={preScript}
-                onChange={setPreScript}
-                placeholder="// Modify request before sending..."
-              />
-              <ScriptEditor
-                title="SSE Chunk Parser"
-                script={parseScript}
-                onChange={setParseScript}
-                placeholder="// Parse each SSE chunk..."
-              />
               <label className="text-xs font-medium block mb-1">SSE Rules (fallback)</label>
               <SseRuleBuilder
                 dataPrefix={ssePrefix}

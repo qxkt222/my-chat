@@ -13,8 +13,6 @@
   "sse_done_marker": "",
   "sse_content_path": "$.result",
   "response_content_path": "$.result",
-  "pre_script": "",
-  "parse_script": "",
   "category": "Official",
   "is_preset": true
 }

@@ -15,6 +15,7 @@ import {
   dbDeleteModel,
   dbGetSetting,
   dbSaveSetting,
+  logDiag,
 } from "@/lib/tauri";
 
 interface SettingsState {
@@ -174,9 +175,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const thinkingRaw = await dbGetSetting("thinking_config");
       if (thinkingRaw) {
         try {
-          const cfg = JSON.parse(thinkingRaw);
+          const cfg = JSON.parse(thinkingRaw) as { enabled?: unknown; effort?: unknown };
           if (typeof cfg.enabled === "boolean") thinkingEnabled = cfg.enabled;
-          if (["low", "medium", "high", "max"].includes(cfg.effort)) reasoningEffort = cfg.effort;
+          // 逐字面量比较而不是 includes()：这样 TS 会把类型收窄，不需要断言
+          if (
+            cfg.effort === "low" ||
+            cfg.effort === "medium" ||
+            cfg.effort === "high" ||
+            cfg.effort === "max"
+          ) {
+            reasoningEffort = cfg.effort;
+          }
         } catch {
           /* ignore bad JSON */
         }
@@ -318,7 +327,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     // Persist the deletion explicitly — save() now upserts (no more
     // delete-all + rewrite), so a locally-removed model would otherwise
     // come back on the next save/restart.
-    dbDeleteModel(name).catch(() => {});
+    dbDeleteModel(name).catch((e: unknown) => {
+      // 落库失败会让这个模型在下次 save / restart 时「复活」—— 必须留痕
+      logDiag(`dbDeleteModel failed: ${String(e)} name=${name}`);
+    });
     set((s) => ({
       models: s.models.filter((m) => m.name !== name),
       activeModel: s.activeModel === name ? "" : s.activeModel,
@@ -331,7 +343,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   persistActiveModel: (name) => {
     set({ activeModel: name });
-    dbSaveSetting("active_model", name).catch(() => {});
+    dbSaveSetting("active_model", name).catch((e: unknown) => {
+      logDiag(`persistActiveModel failed: ${String(e)} name=${name}`);
+    });
   },
 
   persistModel: (name) => {
@@ -344,7 +358,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       api_key_encrypted: m.api_key,
       model: m.model,
       params_json: JSON.stringify(m.parameters || get().defaultParameters),
-    }).catch(() => {});
+    }).catch((e: unknown) => {
+      // 保存模型失败 = 用户以为存了其实没存，最该留痕的一类
+      logDiag(`dbSaveModel failed: ${String(e)} name=${name}`);
+    });
   },
 
   saveSamplerPreset: async (p) => {

@@ -37,9 +37,11 @@ export default [
       // 项目大量错误信息场景,收益低于噪音 → 关)
       "@typescript-eslint/restrict-template-expressions": "off",
       "@typescript-eslint/no-unsafe-assignment": "off", // invoke 层返回 any,DTO 已类型化
-      "@typescript-eslint/no-unsafe-member-access": "off",
+      // 这两条恢复为 warn：`any` 已归零（探针实测 0 处），回归成本低，
+      // 而它们正是「IPC 层悄悄漏进一个 any」的唯一警报器
+      "@typescript-eslint/no-unsafe-member-access": "warn",
       "@typescript-eslint/no-unsafe-argument": "off",
-      "@typescript-eslint/no-unsafe-call": "off",
+      "@typescript-eslint/no-unsafe-call": "warn",
       "no-console": "off",
       ...reactHooks.configs.recommended.rules,
     },

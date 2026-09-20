@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window (event listen/emit, window ops)",
+  "description": "Default capability for the main window (event listen/emit, window ops, open external links in the system browser)",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
-    "core:window:default"
+    "core:window:default",
+    "opener:allow-open-url"
   ]
 }

@@ -9,7 +9,7 @@ import type {
   SimType,
 } from "@/types";
 import { getAppDir, readFile, writeFile, listDir, deleteItem, memSearch } from "@/lib/tauri";
-import { streamChat, cancelChat } from "@/lib/tauri";
+import { streamChat, cancelChat, logDiag } from "@/lib/tauri";
 import { useSettingsStore } from "./useSettingsStore";
 import {
   buildSimSystemParts,
@@ -457,7 +457,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
             });
           },
           onError: (e) => {
-            console.error("Simulation chat error:", e);
+            logDiag(`Simulation chat error: ${String(e)}`);
             void finish(typeof e === "string" ? e : String(e ?? ""));
           },
         }

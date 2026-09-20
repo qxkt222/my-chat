@@ -10,6 +10,7 @@ import {
   pickFile,
   extractDocumentText,
   ocrImage,
+  logDiag,
 } from "@/lib/tauri";
 import { showToast } from "@/components/ui/Toast";
 import { useSettingsStore } from "@/stores/useSettingsStore";
@@ -236,7 +237,11 @@ export function KnowledgeManager() {
               onClick={(e) => {
                 e.stopPropagation();
                 kb.removeBase(b.id);
-                ragDeleteKb(b.id).catch(() => {});
+                ragDeleteKb(b.id).catch((e: unknown) => {
+                  // 删除失败却把界面刷新成「已删除」= 骗用户。这里给可见反馈 + 留痕。
+                  showToast("error", `删除知识库失败：${String(e)}`);
+                  logDiag(`ragDeleteKb failed: ${String(e)} kb=${b.id}`);
+                });
               }}
               className="p-0.5 rounded hover:bg-destructive/20 text-destructive"
             >

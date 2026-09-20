@@ -182,7 +182,9 @@ pub fn import_all_from_json() -> Result<ImportResult, String> {
                     name: m.name,
                     provider: String::new(),
                     api_url: m.api_url,
-                    api_key_encrypted: format!("ENC:{}", encryption::encrypt(&m.api_key)),
+                    // 加密失败留空 key（该模型需重新填），失败原因已由 encryption 层落盘
+                    api_key_encrypted: encryption::encrypt(&m.api_key)
+                        .map_or_else(|_| String::new(), |e| format!("ENC:{e}")),
                     model: m.model,
                     params_json: String::new(),
                 })

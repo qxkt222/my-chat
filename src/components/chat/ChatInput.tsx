@@ -24,6 +24,7 @@ import {
   mcpCallTool,
   ragSearch,
   ragRerank,
+  logDiag,
   type RagResult,
 } from "@/lib/tauri";
 import type { McpServerDto } from "@/types";
@@ -265,7 +266,10 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
           .map((s) => s.content)
           .join("\n\n---\n\n")
           .slice(0, 9000);
-      } catch {}
+      } catch (e: unknown) {
+        // 知识库注入整体失败，会让用户以为「这次带了知识」其实没带 —— 必须留痕
+        logDiag(`knowledge inject failed: ${String(e)}`);
+      }
     }
     setLastSources(sources);
 
@@ -529,7 +533,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
           lastContent
         );
       } catch (e) {
-        console.error("Prompt chain error:", e);
+        logDiag(`Prompt chain error: ${String(e)}`);
       } finally {
         setChainRunning(false);
       }

@@ -15,8 +15,13 @@ pub struct ModelConfig {
 
 pub fn save_model(m: &ModelConfig) -> Result<(), String> {
     let t = tree("models")?;
+    // 加密失败时**保留原值**，不写入空串 —— 静默丢 key 是旧实现最坏的毛病
+    // （失败原因已由 encryption 层落到 chat_errors.log）
     let encrypted = if !m.api_key_encrypted.is_empty() && !m.api_key_encrypted.starts_with("ENC:") {
-        format!("ENC:{}", encryption::encrypt(&m.api_key_encrypted))
+        encryption::encrypt(&m.api_key_encrypted).map_or_else(
+            |_| m.api_key_encrypted.clone(),
+            |enc| format!("ENC:{enc}"),
+        )
     } else {
         m.api_key_encrypted.clone()
     };
@@ -50,7 +55,10 @@ pub fn list_models_decrypted() -> Result<Vec<ModelConfig>, String> {
     for (_, v) in scan_prefix(&t, "m:") {
         if let Ok(mut m) = serde_json::from_slice::<ModelConfig>(&v) {
             if m.api_key_encrypted.starts_with("ENC:") {
-                m.api_key_encrypted = encryption::decrypt(&m.api_key_encrypted[4..]);
+                // 解不开就降级为空 key（失败原因已落盘）——
+                // 用户除了「认证失败」之外，至少多了 chat_errors.log 这条线索
+                m.api_key_encrypted =
+                    encryption::decrypt(&m.api_key_encrypted[4..]).unwrap_or_default();
             }
             list.push(m);
         }
@@ -67,7 +75,8 @@ pub fn get_model_decrypted(name: &str) -> Result<ModelConfig, String> {
         .ok_or("Model not found".to_string())?;
     let mut m: ModelConfig = serde_json::from_slice(&raw).map_err(|e| format!("De: {e}"))?;
     if m.api_key_encrypted.starts_with("ENC:") {
-        m.api_key_encrypted = encryption::decrypt(&m.api_key_encrypted[4..]);
+        // 同上：解不开降级为空 key，原因已由 encryption 层落盘
+        m.api_key_encrypted = encryption::decrypt(&m.api_key_encrypted[4..]).unwrap_or_default();
     }
     Ok(m)
 }

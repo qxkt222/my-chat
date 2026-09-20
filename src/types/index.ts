@@ -412,10 +412,6 @@ export interface ApiTemplate {
   // Response config
   response_content_path: string;
 
-  // Advanced mode
-  pre_script: string;
-  parse_script: string;
-
   // Metadata
   category: string;
   is_preset: boolean;

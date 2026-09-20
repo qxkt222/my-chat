@@ -19,11 +19,14 @@ pub fn read_file_bytes(path: String) -> Result<String, String> {
 /// to export PNG cards (avatar bytes + magic + JSON) built in the frontend.
 #[tauri::command]
 pub fn write_file_bytes(path: String, base64_data: String) -> Result<(), String> {
-    if let Some(parent) = std::path::PathBuf::from(&path).parent() {
+    // 写侧一律过守卫（头像、导出卡都落在应用数据目录内）；
+    // 读侧 read_file_bytes 故意不设限 —— 导入要读用户从对话框选的文件。
+    let p = crate::guard_path(&path)?;
+    if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {e}"))?;
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_data.trim())
         .map_err(|e| format!("Base64 decode error: {e}"))?;
-    std::fs::write(&path, &bytes).map_err(|e| format!("Write error: {e}"))
+    std::fs::write(&p, &bytes).map_err(|e| format!("Write error: {e}"))
 }

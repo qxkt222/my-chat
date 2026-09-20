@@ -36,8 +36,6 @@ export function AdapterConfigDialog({ open, onClose, embedded }: Props) {
             sse_done_marker: data.sse_done_marker || "[DONE]",
             sse_content_path: data.sse_content_path || "",
             response_content_path: data.response_content_path || "",
-            pre_script: data.pre_script || "",
-            parse_script: data.parse_script || "",
             category: "",
             is_preset: false,
           });
@@ -77,8 +75,6 @@ export function AdapterConfigDialog({ open, onClose, embedded }: Props) {
                     sse_done_marker: p.sse_done_marker,
                     sse_content_path: p.sse_content_path,
                     response_content_path: p.response_content_path,
-                    pre_script: p.pre_script,
-                    parse_script: p.parse_script,
                     category: p.category,
                     is_preset: false,
                   });
