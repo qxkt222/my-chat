@@ -47,7 +47,7 @@ once_cell = "1"
 # 原生文件选择对话框（知识库导入）
 rfd = "0.15"
 # PDF 文本提取（知识库文档解析）
-pdf-extract = "0.7"
+pdf-extract = "0.12"
 # docx 解包（word/document.xml 文本提取）
 zip = "2"
 tauri-plugin-opener = "2.5.5"

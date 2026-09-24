@@ -656,17 +656,33 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 - `npm audit`：**淘宝镜像的 `/-/npm/v1/security/*` 返回 404 NOT_IMPLEMENTED —— 该能力不存在**。
   换 `--registry=https://registry.npmjs.org` + 本机代理后真跑通：**417 个依赖，0 漏洞**，exit 0。
   ⚠️ 注意这不是「镜像也没问题」，而是「对着镜像跑等于没跑」。
-- `cargo audit`（0.22.2，本轮 `cargo install`）：**3 个漏洞 + 9 条 warning**。
-  漏洞与修复版本逐条读本地 RustSec 库（`~/.cargo/advisory-db`）确认：
+- `cargo audit`（0.22.2，本轮 `cargo install`）：初测 **3 个漏洞 + 9 条 warning**，
+  逐条读本地 RustSec 库（`~/.cargo/advisory-db`）确认修复版本后，**2 个已修、第 3 个判定为不适用**：
 
-  | 漏洞 | 当前 | 修复版 | 来源 | 判读 |
+  | 漏洞 | 初测 | 修复版 | 来源 | 处置与结果 |
   |---|---|---|---|---|
-  | `RUSTSEC-2026-0187` lopdf | 0.34.0 | **≥ 0.42.0** | **直接依赖** `pdf-extract` | **真风险**：~21KB 恶意 PDF（Catalog 内 ~10000 层嵌套数组）→ 栈溢出 SIGABRT，`catch_unwind` 接不住 |
-  | `RUSTSEC-2026-0258` h2 | 0.4.15 | ≥ 0.4.16 | `reqwest→hyper` | 低危 DoS，差一个补丁版 |
-  | `RUSTSEC-2026-0285` rustls | 0.23.42 | ≥ 0.23.45 | Tauri 依赖树 | CVSS `C:L`，说明书明言无法用于改写/完成握手 |
+  | `RUSTSEC-2026-0187` lopdf | 0.34.0 | ≥ 0.42.0 | **直接依赖** `pdf-extract` | **已修**：`pdf-extract 0.7.12 → 0.12.1` 把 lopdf 抬到 **0.42.0**，零代码改动（唯一调用点 `extract_text` 签名未变） |
+  | `RUSTSEC-2026-0258` h2 | 0.4.15 | ≥ 0.4.16 | `reqwest→hyper` | **已修**：`cargo update -p h2` → **0.4.19** |
+  | `RUSTSEC-2026-0285` rustls | 0.23.42 | ≥ 0.23.45 | 仅存在于 `Cargo.lock` | **不适用**：见下方三条证据 |
 
-  9 条 warning 全是 `unmaintained`/`unsound` 且都在传递依赖里（`unic-*` 一组经 `selectors` 进来；
-  `glib` 是 Linux 专属，Windows 构建不参与）。
+  **「rustls 不适用」的证据链（三条独立通道）**：
+  1. `cargo tree -i rustls --target x86_64-pc-windows-msvc` → **nothing to print**（本目标下无反向依赖）；
+  2. 二进制字节级扫描 `my-chat.exe` → `EXE_CONTAINS_rustls=False`；
+  3. 同一扫描的**阳性对照** → `lopdf-0.34` 为 False 而 `lopdf-0.42` 为 True ——
+     证明这个方法能扫出真实存在的 crate，不是「什么都扫不到」的假阴性。
+
+  ⚠️ 一处易误判：`cargo tree | grep rustls` 会命中 1 行，但那是 **`rustls-pki-types`**（另一个 crate）。
+     只看名字包含就下结论会错；必须用 `-i`（反向依赖）或字节扫描这类**指向性**通道。
+
+  修 lopdf 的起因：advisory 写明 `Document::load_mem` 对嵌套数组**无界递归**，
+  一个 ~21KB 的构造 PDF（Catalog 内约 10000 层嵌套）即栈溢出 **SIGABRT**，
+  且因为是 abort 而非 panic，`catch_unwind` 接不住 —— 对一个会解析用户自选 PDF 的桌面应用是实打实的 DoS 面。
+  代价：release 二进制 **13.13 → 13.37 MiB**。修复后复跑 audit：`3 → 1`（仅剩不适用那条）。
+
+- warning 10 条（升级后新增 `ttf-parser`，是 pdf-extract 0.12.1 的传递依赖）全是
+  `unmaintained`/`unsound`，且都在传递依赖里（`unic-*` 一组经 `selectors` 进来；
+  `glib` 是 Linux 专属，Windows 构建不参与）。**本仓库无法直接消除，如实记录不夸大。**
+
 - `cargo tree -d`：58 个重复条目 / **27 个 crate 名** / **8 个跨主版本共存**
   （`syn 2.0.119 + 3.0.2`、`bitflags`、`indexmap`、`thiserror`、`toml`、`winnow` 等）——
   均为上游传递依赖的正常共存，非本仓库可直接消除的问题。
@@ -719,7 +735,8 @@ lines 60.46% · statements 58.55% · functions 49.6% · branches 52%
 完整回归实测：**exit 0，前端 72/72 用例**。
 
 **本轮所有读数来源**：`gate.mjs` 各闸门、`cargo build --release`、`tauri build`、
-`npm audit`（官方 registry）、`cargo audit`（本地 RustSec 库）、`coverage-summary.json`、
-`node fs.*` 直读盘面、以及启动产物后的 `startup.marker` / `chat_errors.log`。
+`npm audit`（官方 registry）、`cargo audit`（本地 RustSec 库）、`cargo tree -i`、
+二进制字节级扫描、`coverage-summary.json`、`node fs.*` 直读盘面、
+以及启动产物后的 `startup.marker` / `chat_errors.log`。
 **未跑**：`npm outdated` 全量升级评估、跨平台构建、安装包安装后行为 —— 本轮不做，如实记未跑。
 
