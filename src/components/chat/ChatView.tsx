@@ -302,6 +302,7 @@ export function ChatView() {
       userAvatarSrc,
       handleToggleBookmark,
       handleRetry,
+      handleEditMessage,
     ]
   );
 

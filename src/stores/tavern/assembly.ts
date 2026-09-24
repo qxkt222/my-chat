@@ -91,9 +91,7 @@ export function assembleApiMessages(args: {
   attachmentBlock?: string | undefined;
   userContent: string;
 }): Pick<Message, "role" | "content">[] {
-  const out: Pick<Message, "role" | "content">[] = [
-    { role: "system", content: args.stableSystem },
-  ];
+  const out: Pick<Message, "role" | "content">[] = [{ role: "system", content: args.stableSystem }];
   if (args.pinned?.trim()) {
     out.push({ role: "system", content: `【钉住】\n${args.pinned.trim()}` });
   }

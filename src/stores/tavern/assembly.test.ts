@@ -26,7 +26,13 @@ describe("collectLorebooks", () => {
       convIds: ["ca", "pa"], // 与 Persona 重复
       byId: { ga: globalA, pa: personaA, ca: convA },
     });
-    expect(books.map((b) => b.name)).toEqual(["主世界书", "角色内嵌", "全局 A", "Persona A", "会话 A"]);
+    expect(books.map((b) => b.name)).toEqual([
+      "主世界书",
+      "角色内嵌",
+      "全局 A",
+      "Persona A",
+      "会话 A",
+    ]);
   });
 
   it("空书（null / undefined / id 找不到）一律过滤掉", () => {

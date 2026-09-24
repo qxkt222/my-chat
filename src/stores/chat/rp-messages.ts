@@ -16,9 +16,7 @@ export function assembleRpMessages(args: {
   summary?: string | undefined;
   depthPrompt?: { depth: number; prompt: string } | undefined;
 }): Pick<Message, "role" | "content">[] {
-  const out: Pick<Message, "role" | "content">[] = [
-    { role: "system", content: args.stableSystem },
-  ];
+  const out: Pick<Message, "role" | "content">[] = [{ role: "system", content: args.stableSystem }];
 
   // 历史里的 system 消息一律丢弃：它们已经在 stableSystem 里了
   for (const m of args.history) {

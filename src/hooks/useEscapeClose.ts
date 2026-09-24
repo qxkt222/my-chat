@@ -12,10 +12,7 @@ import { useEffect } from "react";
  * @param onClose 关闭回调(弹层打开时传入;关闭后传 undefined 避免误触发)
  * @param deps 附加依赖(默认 [onClose])
  */
-export function useEscapeClose(
-  onClose: (() => void) | undefined,
-  deps: unknown[] = []
-): void {
+export function useEscapeClose(onClose: (() => void) | undefined, deps: unknown[] = []): void {
   useEffect(() => {
     if (!onClose) return;
     const cb = onClose;

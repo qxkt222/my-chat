@@ -135,10 +135,12 @@ export function AdapterConfigDialog({ open, onClose, embedded }: Props) {
             <Plus className="w-3 h-3" /> {t("adapter.create")}
           </button>
           <button
-            onClick={() => void (async () => {
-              const raw = await askPrompt("Paste JSON:");
-              if (raw !== null) importTemplate(raw);
-            })()}
+            onClick={() =>
+              void (async () => {
+                const raw = await askPrompt("Paste JSON:");
+                if (raw !== null) importTemplate(raw);
+              })()
+            }
             className="px-3 py-1 text-xs border border-input rounded hover:bg-muted flex items-center gap-1"
           >
             <Upload className="w-3 h-3" /> {t("adapter.import")}
@@ -175,10 +177,12 @@ export function AdapterConfigDialog({ open, onClose, embedded }: Props) {
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <button
-            onClick={() => void (async () => {
-              const raw = await askPrompt("Paste JSON:");
-              if (raw !== null) importTemplate(raw);
-            })()}
+            onClick={() =>
+              void (async () => {
+                const raw = await askPrompt("Paste JSON:");
+                if (raw !== null) importTemplate(raw);
+              })()
+            }
             className="px-3 py-1 text-xs border border-input rounded hover:bg-muted flex items-center gap-1"
           >
             <Upload className="w-3 h-3" /> {t("adapter.import")}

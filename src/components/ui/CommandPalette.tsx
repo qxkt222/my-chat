@@ -54,6 +54,8 @@ export function CommandPalette({ open, onClose, onOpenSettings }: Props) {
       }, 0);
       return () => window.clearTimeout(id);
     }
+    // 显式返回：noImplicitReturns 要求所有分支同形（未打开时无可清理资源）
+    return undefined;
   }, [open]);
 
   // 全局 Escape 关闭(焦点不在输入框时也可退出;capture 阻断全局"停止生成"快捷键误触发)

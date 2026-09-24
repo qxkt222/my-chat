@@ -154,11 +154,7 @@ const markdownComponents: Components = {
 
     // Code block：纯文本给「复制 / 插入输入框」，原 children 给渲染（保高亮）
     return (
-      <CodeBlock
-        language={match ? (match[1] ?? "") : ""}
-        code={codeStr}
-        highlighted={children}
-      />
+      <CodeBlock language={match ? (match[1] ?? "") : ""} code={codeStr} highlighted={children} />
     );
   },
   pre({ children }) {

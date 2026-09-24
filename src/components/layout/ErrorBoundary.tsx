@@ -11,12 +11,12 @@ interface State {
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false, error: "" };
+  override state: State = { hasError: false, error: "" };
   static getDerivedStateFromError(e: Error): State {
     return { hasError: true, error: e.message };
   }
 
-  render() {
+  override render() {
     if (this.state.hasError) {
       return (
         <div className="flex items-center justify-center h-screen bg-background">

@@ -33,12 +33,22 @@
  * 重定向到文件在两种环境下都稳。
  *
  * 用法:
- *   node scripts/gate.mjs typecheck | lint | test | build | all
+ *   node scripts/gate.mjs typecheck | lint | format | rustfmt | test | coverage | build | all
  *   node scripts/gate.mjs rust-check | rust-test | rust-clippy
  *   node scripts/gate.mjs assert-git     版本控制基线是否真的成立
  *   node scripts/gate.mjs assert-tests   0 失败且用例数不低于基线
- *   node scripts/gate.mjs assert-lint    0 错误且告警不超基线
+ *   node scripts/gate.mjs assert-lint    0 错误且告警数不超基线
+ *   node scripts/gate.mjs assert-format  prettier 不合格文件数不超基线
+ *   node scripts/gate.mjs assert-rustfmt rustfmt 无 diff
+ *   node scripts/gate.mjs assert-coverage 覆盖率四项读数不低于地板
  *   node scripts/gate.mjs assert-build   构建产物真实可用
+ *
+ * ⚠️ 2026-09-25 最严健康度审查补录：format 与 rustfmt 这两道闸门是**新接的**。
+ *    在此之前「prettier 全绿 · fmt 0 diff」只写在 PROGRESS.md 的标准行里，
+ *    gate 里没有任何对应检查 —— 实测当时 prettier 有 42 个文件不合格、
+ *    rustfmt 有 diff，而这两项「全绿」被当成事实用了好几轮。
+ *    文档承诺 ≠ 闸门：凡是写进标准行的读数，都必须有一道能变红的闸门兜着。
+ *    lint 闸门同理补 --max-warnings 0 —— 否则告警不改退出码，又是假绿（与 clippy 同型）。
  *
  * 退出码:0 通过;1 断言失败;其它非 0 = 子进程退出码;127 = 无法启动。
  */
@@ -65,8 +75,15 @@ const NODE = process.execPath;
 const BASELINE = {
   trackedFiles: 234, // git ls-files 实测
   minTests: 34, // vitest numPassedTests 实测
-  maxLintWarnings: 4, // eslint 实测
+  // 2026-09-25 最严健康度审查：4 → 0。
+  // 原值把「升级前的实测值」当成了容忍上限，于是 eslint 报 3 条告警时 lint 闸门照样绿灯 ——
+  // 标准写着「0 警告」，闸门却放行 4 条。现清零，并给 lint 闸门加 --max-warnings 0。
+  maxLintWarnings: 0,
   lintErrors: 0,
+  // 2026-09-25 新增：这两条标准此前只写在文档里，闸门里根本没有对应检查 ——
+  // 实测当时 prettier 有 42 个文件不合格、rustfmt 有 diff，全都没人发现。
+  maxPrettierUnformatted: 0,
+  maxRustfmtDiffFiles: 0,
 };
 
 const BIN = {
@@ -74,7 +91,12 @@ const BIN = {
   vite: "node_modules/vite/bin/vite.js",
   vitest: "node_modules/vitest/vitest.mjs",
   eslint: "node_modules/eslint/bin/eslint.js",
+  prettier: "node_modules/prettier/bin/prettier.cjs",
 };
+
+/** 源码 glob：与 package.json scripts 一致，防两处漂移 */
+const SRC_GLOB = "src/**/*.{ts,tsx,css,html}";
+const LINT_GLOB = "src/**/*.{ts,tsx}";
 
 const TMP = mkdtempSync(path.join(tmpdir(), "my-chat-gate-"));
 
@@ -152,12 +174,29 @@ const GATES = {
     run: () => step(NODE, [BIN.tsc, "--noEmit"]),
   },
   lint: {
-    desc: "ESLint(flat config,与 package.json 同 glob)",
-    run: () => step(NODE, [BIN.eslint, "src/**/*.{ts,tsx}"]),
+    desc: "ESLint(flat config,与 package.json 同 glob，警告即失败)",
+    // ⚠️ 必须带 --max-warnings 0：eslint 默认「有告警仍 exit 0」，
+    //    与 clippy 不带 -D warnings 是同一类假绿。实测证据（2026-09-25）：
+    //    同一份代码不带该参数 exit 0，带上 exit 1。
+    run: () => step(NODE, [BIN.eslint, LINT_GLOB, "--max-warnings", "0"]),
+  },
+  format: {
+    desc: "Prettier 格式检查(只读,不改文件)",
+    run: () => step(NODE, [BIN.prettier, "--check", SRC_GLOB]),
+  },
+  rustfmt: {
+    desc: "rustfmt 格式检查(cargo fmt --check,只读)",
+    run: () => step(CARGO, ["fmt", "--check"], "src-tauri"),
   },
   test: {
     desc: "vitest run(单元 + 组件冒烟)",
     run: () => step(NODE, [BIN.vitest, "run"]),
+  },
+  coverage: {
+    desc: "vitest run --coverage(覆盖率地板阈值见 vite.config.ts)",
+    // 阈值写在 vite.config.ts 的 test.coverage.thresholds ——
+    // 覆盖率不足时 vitest 自己 exit 1，闸门无需另算百分比。
+    run: () => step(NODE, [BIN.vitest, "run", "--coverage"]),
   },
   build: {
     desc: "生产构建(= npm run build)",
@@ -171,9 +210,9 @@ const GATES = {
     },
   },
   all: {
-    desc: "全套闸门:typecheck → lint → test → build",
+    desc: "全套闸门:typecheck → lint → format → rustfmt → test → coverage → build",
     run: () => {
-      for (const g of ["typecheck", "lint", "test", "build"]) {
+      for (const g of ["typecheck", "lint", "format", "rustfmt", "test", "coverage", "build"]) {
         const code = GATES[g].run();
         if (code !== 0) {
           console.error(`\n✗ 闸门 "${g}" 失败(exit ${code})`);
@@ -301,8 +340,79 @@ const GATES = {
     },
   },
 
+  "assert-format": {
+    desc: "格式断言:prettier 不合格文件数 ≤ 基线",
+    run: () => {
+      const r = capture(NODE, [BIN.prettier, "--check", SRC_GLOB]);
+      // 口径：prettier --check 每个不合格文件打一行 "[warn] <路径>"。
+      // 不解析汇总行——没有汇总行，只有逐文件 warn + 结尾一句提示。
+      const bad = r.text.split("\n").filter((l) => l.startsWith("[warn]")).length;
+      console.log(`  prettier 不合格文件 = ${bad}`);
+      check(r.status === 0, "prettier --check 退出码 == 0", `实测 ${r.status}`);
+      check(
+        bad <= BASELINE.maxPrettierUnformatted,
+        `不合格文件数 ≤ ${BASELINE.maxPrettierUnformatted}`,
+        `实测 ${bad}`,
+      );
+      return finish("assert-format");
+    },
+  },
+
+  "assert-rustfmt": {
+    desc: "Rust 格式断言:rustfmt 无 diff",
+    run: () => {
+      const r = capture(CARGO, ["fmt", "--check"], "src-tauri");
+      // 口径：--check 只列「Diff in <文件>:<行>」首部，每个文件一段。
+      // 按文件去重计数，避免同一文件的多个 diff 段被当成多个文件。
+      const files = new Set(
+        [...r.text.matchAll(/^Diff in (.+?):\d+/gm)].map((m) => m[1].replace(/^\\\\\?\\/, "")),
+      );
+      console.log(`  rustfmt 有 diff 的文件 = ${files.size}`);
+      check(r.status === 0, "cargo fmt --check 退出码 == 0", `实测 ${r.status}`);
+      check(
+        files.size <= BASELINE.maxRustfmtDiffFiles,
+        `有 diff 的文件数 ≤ ${BASELINE.maxRustfmtDiffFiles}`,
+        `实测 ${files.size}`,
+      );
+      return finish("assert-rustfmt");
+    },
+  },
+
+  "assert-coverage": {
+    desc: "覆盖率断言:真跑 --coverage 且四项读数不低于地板",
+    run: () => {
+      const code = GATES.coverage.run();
+      if (code !== 0) {
+        console.error(`✗ 覆盖率闸门本身失败(exit ${code}),无法断言读数`);
+        return code;
+      }
+      const p = path.join(ROOT, "coverage", "coverage-summary.json");
+      if (!existsSync(p)) {
+        check(false, "coverage/coverage-summary.json 存在");
+        return finish("assert-coverage");
+      }
+      const total = JSON.parse(readFileSync(p, "utf8")).total ?? {};
+      // 地板与 vite.config.ts 的 thresholds 同源,但这里独立复核一遍:
+      // 只看退出码的话,阈值被谁删掉都不会有人发现。
+      //
+      // ⚠️ 口径差(已实测,不是 bug):同一份覆盖率有两个读数 ——
+      //    · 控制台 "All files" 行:  branches 52.24 (v8 provider 自己的算法)
+      //    · coverage-summary.json:  branches 52    (istanbul 经典 covered/total=440/846=52.0046,被 floor)
+      //    这里**故意**读结构化 JSON:字段名稳定、可编程读,不依赖表格排版;
+      //    代价是比控制台低不到 1 个点。地板取值时已把这点余量算进去。
+      const floors = { lines: 58, statements: 56, functions: 47, branches: 50 };
+      for (const [k, floor] of Object.entries(floors)) {
+        const v = total[k]?.pct ?? NaN;
+        console.log(`  ${k} = ${v}% (地板 ${floor}%)`);
+        check(Number.isFinite(v) && v >= floor, `${k} ≥ ${floor}%`, `实测 ${v}%`);
+      }
+      return finish("assert-coverage");
+    },
+  },
+
   "assert-build": {
     desc: "构建产物断言:dist 真实可用",
+
     run: () => {
       const code = GATES.build.run();
       if (code !== 0) {

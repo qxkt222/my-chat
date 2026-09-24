@@ -135,7 +135,7 @@ export function TavernView({ onOpenSettings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [active?.id, active?.messages.length, activeCard, charStore.characters]);
+  }, [active, activeCard, charStore.characters]);
 
   // 记忆图谱点击跳转:滚动到对应消息并高亮闪烁(此前 onJump 只关面板,跳转是假的)
   const jumpToMessage = (msgId: string) => {
@@ -412,8 +412,12 @@ export function TavernView({ onOpenSettings }: Props) {
                       </label>
                       {/* 群聊说话队列:自动模式下显示当前轮到谁 */}
                       {!!active.autoRespond && active.groupCharIds && (
-                        <span className="text-[10px] text-primary whitespace-nowrap" title="群聊说话队列:自动模式按角色顺序轮转">
-                          队列:{(() => {
+                        <span
+                          className="text-[10px] text-primary whitespace-nowrap"
+                          title="群聊说话队列:自动模式按角色顺序轮转"
+                        >
+                          队列:
+                          {(() => {
                             const idx = active.queueIndex ?? 0;
                             const qc = active.groupCharIds[idx % active.groupCharIds.length];
                             return charStore.characters.find((c) => c.id === qc)?.name || "?";
@@ -765,7 +769,9 @@ export function TavernView({ onOpenSettings }: Props) {
                                 : undefined
                             }
                             onContinue={
-                              isLastAssistant ? (msg) => void tavern.continueMessage(msg.id) : undefined
+                              isLastAssistant
+                                ? (msg) => void tavern.continueMessage(msg.id)
+                                : undefined
                             }
                             onEdit={editMessage}
                           />

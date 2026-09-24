@@ -16,8 +16,15 @@ interface SearxResult {
 
 /** 从本机 SearXNG JSON API 拉取结果 */
 async function searchViaSearxng(query: string): Promise<string | null> {
-  const params = new URLSearchParams({ q: query, format: "json", language: "zh-CN", safesearch: "0" });
-  const resp = await fetch(`${SEARXNG_URL}?${params.toString()}`, { signal: AbortSignal.timeout(8000) });
+  const params = new URLSearchParams({
+    q: query,
+    format: "json",
+    language: "zh-CN",
+    safesearch: "0",
+  });
+  const resp = await fetch(`${SEARXNG_URL}?${params.toString()}`, {
+    signal: AbortSignal.timeout(8000),
+  });
   if (!resp.ok) return null;
   const data = (await resp.json()) as { results?: SearxResult[] };
   const results = (data.results || []).slice(0, 6);
@@ -36,7 +43,9 @@ async function searchViaDuckDuckGo(query: string): Promise<string> {
   const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const html = await resp.text();
-  const links = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+  const links = [
+    ...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g),
+  ]
     .slice(0, 6)
     .map((m) => ({ href: m[1], text: (m[2] || "").replace(/<[^>]+>/g, "").trim() }));
   const snips = [...html.matchAll(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)]

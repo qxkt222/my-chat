@@ -63,12 +63,20 @@ export const usePluginStore = create<PluginState>((set) => ({
     if (pluginAPI.getPlugin(id)?.enabled) pluginAPI.deactivate(id);
     else pluginAPI.activate(id);
     // 持久化当前启用集合(重启恢复)
-    persistEnabled(listPlugins().filter((p) => p.enabled).map((p) => p.manifest.id));
+    persistEnabled(
+      listPlugins()
+        .filter((p) => p.enabled)
+        .map((p) => p.manifest.id)
+    );
     set({ plugins: [...listPlugins()] });
   },
   remove: (id) => {
     pluginAPI.remove(id);
-    persistEnabled(listPlugins().filter((p) => p.enabled).map((p) => p.manifest.id));
+    persistEnabled(
+      listPlugins()
+        .filter((p) => p.enabled)
+        .map((p) => p.manifest.id)
+    );
     set({ plugins: [...listPlugins()] });
   },
 }));

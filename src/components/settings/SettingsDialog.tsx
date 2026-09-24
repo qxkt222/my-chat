@@ -264,7 +264,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               <div className="p-3 border border-border rounded-md bg-card mb-2">
                 <div className="text-xs font-medium mb-1 flex items-center gap-1.5">
                   <span className="text-primary">▦</span> {t("settings.profiles")}
-                  <span className="text-[9px] text-muted-foreground">{t("settings.profileHint")}</span>
+                  <span className="text-[9px] text-muted-foreground">
+                    {t("settings.profileHint")}
+                  </span>
                 </div>
                 {s.connectionProfiles.length > 0 && (
                   <div className="space-y-1 mb-2">
@@ -277,7 +279,10 @@ export function SettingsDialog({ open, onClose }: Props) {
                         <button
                           onClick={() => {
                             void s.applyConnectionProfile(p.id).then((ok) => {
-                              showToast(ok ? "success" : "error", ok ? t("settings.profileApplied") : t("settings.profileNeedModel"));
+                              showToast(
+                                ok ? "success" : "error",
+                                ok ? t("settings.profileApplied") : t("settings.profileNeedModel")
+                              );
                               setModels([...useSettingsStore.getState().models]);
                             });
                           }}
