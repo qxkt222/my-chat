@@ -13,18 +13,16 @@ import { useCacheStatsStore } from "./useCacheStatsStore";
 import { useTaskStore } from "./useTaskStore";
 import { setMessagesProvider, pluginAPI } from "@/plugin/PluginHost";
 
-function msgId(): string {
-  return crypto.randomUUID();
-}
-function nowISO(): string {
-  return new Date().toISOString();
-}
-
-/** 工作模式自动记忆(记忆卡):开关 + 阈值(距上次摘要新增消息数) */
-const WORK_SUMMARIZE_KEY = "work_auto_summarize";
-const WORK_SUMMARIZE_THRESHOLD = 15;
-/** 临时会话(免记忆):开关——开启时本次会话完全不读写记忆 */
-const WORK_TEMP_MODE_KEY = "work_temp_mode";
+// 工具与常量抽到 ./chat/utils.ts（它们与 store 状态无关）
+// 注：下面的 pendingStreams / flushPendingStreams 依赖 useChatStore.setState，
+// 搬出去会形成循环依赖，故有意留在本文件。
+import {
+  msgId,
+  nowISO,
+  WORK_SUMMARIZE_KEY,
+  WORK_SUMMARIZE_THRESHOLD,
+  WORK_TEMP_MODE_KEY,
+} from "./chat/utils";
 
 /** 流式 token 合帧(rAF):每个 requestId 待刷新的 token 累积,每帧最多一次 set。
  *   finish()/cancel 前需 flush 挂起帧,否则最后一批 token 会丢。 */

@@ -27,12 +27,13 @@ import { ContextViewer } from "@/components/tavern/ContextViewer";
 import { QuickReplyBar } from "@/components/chat/QuickReplyBar";
 import { MemoryGraphPanel } from "@/components/tavern/MemoryGraphPanel";
 import { extractGraph } from "@/lib/memory-graph";
+import { filterCharacters, groupConversationsByCharacter } from "./selectors";
 import { useT } from "@/lib/i18n";
 import { detectEmotion, emotionImagePath, emotionImageExists } from "@/lib/emotion";
 import { showToast } from "@/components/ui/Toast";
 import { askPrompt } from "@/components/ui/ConfirmDialog";
 import { MessageBubble } from "@/components/chat/MessageBubble";
-import type { Message, TavernConversation } from "@/types";
+import type { Message } from "@/types";
 
 interface Props {
   onOpenSettings: () => void;
@@ -86,24 +87,16 @@ export function TavernView({ onOpenSettings }: Props) {
     return () => window.removeEventListener("keydown", h);
   }, [showGroupPicker, showLorePicker]);
 
-  const cards = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return q
-      ? charStore.characters.filter(
-          (c) => c.name.toLowerCase().includes(q) || c.tags.some((x) => x.toLowerCase().includes(q))
-        )
-      : charStore.characters;
-  }, [charStore.characters, search]);
+  // 派生计算抽到 ./selectors.ts（纯函数 + 测试）
+  const cards = useMemo(
+    () => filterCharacters(charStore.characters, search),
+    [charStore.characters, search]
+  );
 
-  const convsByChar = useMemo(() => {
-    const map: Record<string, TavernConversation[]> = {};
-    for (const c of tavern.conversations) {
-      // 群聊独立分组(此前塞进首角色名下,分组/搜索错位)
-      const key = (c.groupCharIds?.length || 0) >= 2 ? "__group__" : c.character_id;
-      (map[key] ||= []).push(c);
-    }
-    return map;
-  }, [tavern.conversations]);
+  const convsByChar = useMemo(
+    () => groupConversationsByCharacter(tavern.conversations),
+    [tavern.conversations]
+  );
 
   const active = tavern.getActive();
   const activeCard = active ? charStore.characters.find((c) => c.id === active.character_id) : null;

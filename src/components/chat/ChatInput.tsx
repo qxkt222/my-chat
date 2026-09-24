@@ -20,16 +20,16 @@ import { pluginAPI } from "@/plugin/PluginHost";
 import { SLASH_COMMANDS } from "@/plugin/commands";
 import {
   mcpListServers,
-  mcpListTools,
-  mcpCallTool,
   ragSearch,
   ragRerank,
   logDiag,
   type RagResult,
 } from "@/lib/tauri";
 import type { McpServerDto } from "@/types";
-import { useT, t } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 import { countTokens } from "@/lib/token-counter";
+import { detectChainTrigger, detectMentionQuery } from "./input-triggers";
+import { runMcpStep } from "./mcp-step";
 import { AtMentionMenu, type MentionSelection, type AtMentionMenuHandle } from "./AtMentionMenu";
 import { setCodeInsertHandler } from "@/lib/code-insert";
 import { loadChains, runPromptChain, type PromptChain } from "@/lib/prompt-chain";
@@ -481,19 +481,19 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     [skills, setActiveKb]
   );
 
-  /** 输入变化:检测 @ 触发菜单(取 @ 后的单词作搜索词)+ `..` 触发 prompt 链 */
+  /** 输入变化:检测 @ 触发菜单 + `..` 触发 prompt 链（判定逻辑在 ./input-triggers.ts） */
   const handleInputChange = useCallback((v: string) => {
-    // `..` 触发 prompt 链选择器(移除触发词,避免输入框残留)
-    if (/\s\.\.\s*$/.test(v) || v.trim() === "..") {
-      setInput(v.replace(/\s*\.\.\s*$/, ""));
+    const chain = detectChainTrigger(v);
+    if (chain.triggered) {
+      setInput(chain.stripped);
       setChainPick(loadChains());
       setMentionQuery(null);
       return;
     }
     setInput(v);
-    const m = /@([^\s@]*)$/.exec(v);
-    if (m) {
-      setMentionQuery(m[1] || "");
+    const q = detectMentionQuery(v);
+    if (q !== null) {
+      setMentionQuery(q);
       setMentionHighlight(0);
     } else {
       setMentionQuery(null);
@@ -917,32 +917,5 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   );
 }
 
-/** One MCP tool-call step: resolve tool, substitute {prev}, call it. */
-async function runMcpStep(
-  server: McpServerDto,
-  toolName: string,
-  argText: string,
-  prev: string
-): Promise<string> {
-  const tools = await mcpListTools(server.id);
-  const tool = tools.find((t) => t.name === toolName);
-  if (!tool) {
-    return t("chat.mcpNoTools", {
-      s: server.name,
-      t: toolName,
-      list: tools.map((t) => t.name).join("、") || t("chat.mcpNone"),
-    });
-  }
-  let argsObj: Record<string, unknown> = {};
-  if (argText) {
-    let tpl = argText;
-    if (tpl.includes("{prev}")) tpl = tpl.split("{prev}").join(prev);
-    try {
-      argsObj = JSON.parse(tpl);
-    } catch {
-      argsObj = { query: tpl };
-    }
-  }
-  const r = await mcpCallTool(server.id, tool.name, argsObj);
-  return r.content || t("chat.mcpEmptyResult");
-}
+// runMcpStep 已移到 ./mcp-step.ts（它与组件状态无关，是文件末尾的顶层函数）
+

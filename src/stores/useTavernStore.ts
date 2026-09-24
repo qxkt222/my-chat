@@ -29,6 +29,7 @@ import {
 } from "./tavern/constants";
 import { resolveConversationVars, mergeTimedLore, buildAttachmentBlock } from "./tavern/prompt";
 import { parseGroupOwner } from "./tavern/group-owner";
+import { assembleApiMessages, collectLorebooks, makeSamplerPicker } from "./tavern/assembly";
 
 interface TavernState {
   conversations: TavernConversation[];
@@ -485,18 +486,14 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     // RP system_prompt:角色卡 + Persona + 预设 + 世界书(复用 rp-prompt 组装)
     const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
     // 世界书合并(酒馆四类来源):主(恒) + 全局启用的独立书 + 角色内嵌 + Persona 多选 + 会话绑定
-    const activeIds = new Set([
-      ...charStore.enabledLorebookIds,
-      ...(persona?.lorebookIds || []),
-      ...(conv.lorebookIds || []),
-      // 角色卡绑定的独立世界书(角色级,多选)
-      ...(card.lorebookIds || []),
-    ]);
-    const books = [
-      charStore.globalLorebook,
-      card.character_book,
-      ...[...activeIds].map((id) => charStore.lorebooks[id]),
-    ].filter((b) => !!b) as NonNullable<typeof card.character_book>[];
+    const books = collectLorebooks({
+      globalLorebook: charStore.globalLorebook,
+      card,
+      enabledIds: charStore.enabledLorebookIds,
+      personaIds: persona?.lorebookIds || [],
+      convIds: conv.lorebookIds || [],
+      byId: charStore.lorebooks,
+    });
     // 三段式(DeepSeek 缓存核心):stableSystem 前缀恒定,世界书/摘要尾部可变
     const parts = buildRpSystemParts({
       card,
@@ -511,47 +508,23 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     // 定时世界书:更新会话 sticky/cooldown 状态(不落盘,下次 saveConv 带出)
     const timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
 
-    // 采样器(酒馆 API 响应配置):会话预设优先,回退模型参数/全局默认
+    // 采样器回退链细节见 ./tavern/assembly.ts（会话预设 → 模型参数 → 全局默认 → 不发送）
     const sampler = settingsStore.samplerPresets.find((p) => p.id === conv.samplerPresetId);
-    const pick = (
-      k:
-        | "temperature"
-        | "top_p"
-        | "top_k"
-        | "repetition_penalty"
-        | "frequency_penalty"
-        | "presence_penalty"
-        | "min_p"
-        | "mirostat"
-        | "mirostat_tau"
-        | "mirostat_eta"
-        | "dry_multiplier"
-        | "dry_base"
-        | "dry_allowed_length"
-        | "dry_penalty_last_n"
-    ): number | null => {
-      if (sampler && sampler[k] != null) return sampler[k] as number;
-      if (model.parameters && model.parameters[k] != null) return model.parameters[k] as number;
-      const d = settingsStore.defaultParameters[k];
-      return d != null ? d : null;
-    };
+    const pick = makeSamplerPicker(sampler, model.parameters, settingsStore.defaultParameters);
 
     // API messages 三段式:system(stable) 前缀 + 历史 + 世界书/摘要尾部 + user 最后
-    const apiMessages: Pick<Message, "role" | "content">[] = [
-      { role: "system", content: parts.stableSystem },
+    // （顺序细节抽到 ./tavern/assembly.ts，那边有钉住顺序的回归测试守着）
+    const apiMessages = assembleApiMessages({
+      stableSystem: parts.stableSystem,
       // 钉住区(40):关键承诺/伏笔/人物关系钉入稳定前缀区(缓存友好,永远在场)
-      ...(conv.pinned?.trim()
-        ? [{ role: "system" as const, content: `【钉住】\n${conv.pinned.trim()}` }]
-        : []),
-      ...conv.messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
-    if (parts.lorebook) apiMessages.push({ role: "system", content: parts.lorebook });
-    if (parts.summary)
-      apiMessages.push({ role: "system", content: `【对话摘要】\n${parts.summary}` });
-    // 数据银行/聊天附件(酒馆 Data Bank):注入可变尾部,缓存友好
-    const attBlock = buildAttachmentBlock(conv);
-    if (attBlock) apiMessages.push({ role: "system", content: attBlock });
-    apiMessages.push({ role: "user", content });
+      pinned: conv.pinned,
+      history: conv.messages,
+      lorebook: parts.lorebook,
+      summary: parts.summary,
+      // 数据银行/聊天附件(酒馆 Data Bank):注入可变尾部,缓存友好
+      attachmentBlock: buildAttachmentBlock(conv),
+      userContent: content,
+    });
     // 双记忆槽(26)+ 作者注四维(酒馆 note:depth/position/role)——按配置注入;
     // position="in_chat" 在历史第 N 条后插入,role 决定消息角色
     if (conv.note?.trim()) {
@@ -774,18 +747,14 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       charStore.getActivePersona() ||
       null;
     const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
-    const activeIds = new Set([
-      ...charStore.enabledLorebookIds,
-      ...(persona?.lorebookIds || []),
-      ...(conv.lorebookIds || []),
-      // 角色卡绑定的独立世界书(角色级,多选)
-      ...(card.lorebookIds || []),
-    ]);
-    const books = [
-      charStore.globalLorebook,
-      card.character_book,
-      ...[...activeIds].map((id) => charStore.lorebooks[id]),
-    ].filter((b) => !!b) as NonNullable<typeof card.character_book>[];
+    const books = collectLorebooks({
+      globalLorebook: charStore.globalLorebook,
+      card,
+      enabledIds: charStore.enabledLorebookIds,
+      personaIds: persona?.lorebookIds || [],
+      convIds: conv.lorebookIds || [],
+      byId: charStore.lorebooks,
+    });
     const parts = buildRpSystemParts({
       card,
       persona,
@@ -797,21 +766,16 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       timed: conv.timedLore,
     });
     const timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
-    const apiMessages: Pick<Message, "role" | "content">[] = [
-      { role: "system", content: parts.stableSystem },
-      // 钉住区(40):常驻上下文,重放同样生效
-      ...(conv.pinned?.trim()
-        ? [{ role: "system" as const, content: `【钉住】\n${conv.pinned.trim()}` }]
-        : []),
-      ...before.map((m) => ({ role: m.role, content: m.content })),
-    ];
-    if (parts.lorebook) apiMessages.push({ role: "system", content: parts.lorebook });
-    if (parts.summary)
-      apiMessages.push({ role: "system", content: `【对话摘要】\n${parts.summary}` });
-    // 数据银行/聊天附件(酒馆 Data Bank):重放同样注入
-    const attBlock = buildAttachmentBlock(conv);
-    if (attBlock) apiMessages.push({ role: "system", content: attBlock });
-    apiMessages.push({ role: "user", content: lastUser.content });
+    const apiMessages = assembleApiMessages({
+      stableSystem: parts.stableSystem,
+      pinned: conv.pinned, // 钉住区(40):常驻上下文,重放同样生效
+      history: before,
+      lorebook: parts.lorebook,
+      summary: parts.summary,
+      // 数据银行/聊天附件(酒馆 Data Bank):重放同样注入
+      attachmentBlock: buildAttachmentBlock(conv),
+      userContent: lastUser.content,
+    });
     // 双记忆槽(26)+ 作者注四维(酒馆 note:depth/position/role)
     if (conv.note?.trim()) {
       const withNote = injectAuthorNote(apiMessages, {
@@ -833,28 +797,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     }
 
     const sampler = settingsStore.samplerPresets.find((p) => p.id === conv.samplerPresetId);
-    const pick = (
-      k:
-        | "temperature"
-        | "top_p"
-        | "top_k"
-        | "repetition_penalty"
-        | "frequency_penalty"
-        | "presence_penalty"
-        | "min_p"
-        | "mirostat"
-        | "mirostat_tau"
-        | "mirostat_eta"
-        | "dry_multiplier"
-        | "dry_base"
-        | "dry_allowed_length"
-        | "dry_penalty_last_n"
-    ): number | null => {
-      if (sampler && sampler[k] != null) return sampler[k] as number;
-      if (model.parameters && model.parameters[k] != null) return model.parameters[k] as number;
-      const d = settingsStore.defaultParameters[k];
-      return d != null ? d : null;
-    };
+    const pick = makeSamplerPicker(sampler, model.parameters, settingsStore.defaultParameters);
 
     // 占位:新版本流式写入该消息,完成后 push 进 variants 指向新版
     const requestId = uuid();
@@ -1052,17 +995,14 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       charStore.getActivePersona() ||
       null;
     const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
-    const activeIds = new Set([
-      ...charStore.enabledLorebookIds,
-      ...(persona?.lorebookIds || []),
-      ...(conv.lorebookIds || []),
-      ...(card.lorebookIds || []),
-    ]);
-    const books = [
-      charStore.globalLorebook,
-      card.character_book,
-      ...[...activeIds].map((id) => charStore.lorebooks[id]),
-    ].filter((b) => !!b) as NonNullable<typeof card.character_book>[];
+    const books = collectLorebooks({
+      globalLorebook: charStore.globalLorebook,
+      card,
+      enabledIds: charStore.enabledLorebookIds,
+      personaIds: persona?.lorebookIds || [],
+      convIds: conv.lorebookIds || [],
+      byId: charStore.lorebooks,
+    });
     const parts = buildRpSystemParts({
       card,
       persona,
@@ -1074,21 +1014,17 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       timed: conv.timedLore,
     });
     const timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
-    const apiMessages: Pick<Message, "role" | "content">[] = [
-      { role: "system", content: parts.stableSystem },
-      ...(conv.pinned?.trim()
-        ? [{ role: "system" as const, content: `【钉住】\n${conv.pinned.trim()}` }]
-        : []),
-      ...conv.messages.slice(0, idx + 1).map((m) => ({ role: m.role, content: m.content })),
+    const apiMessages = assembleApiMessages({
+      stableSystem: parts.stableSystem,
+      pinned: conv.pinned,
+      history: conv.messages.slice(0, idx + 1),
+      lorebook: parts.lorebook,
+      summary: parts.summary,
+      // 数据银行/聊天附件(酒馆 Data Bank):续写同样注入
+      attachmentBlock: buildAttachmentBlock(conv),
       // 明确要求续写:以原回复结尾为起点继续
-      { role: "user", content: "(请从最后一句继续刚才的回复,保持语气与视角,直接续写不要解释)" },
-    ];
-    if (parts.lorebook) apiMessages.push({ role: "system", content: parts.lorebook });
-    if (parts.summary)
-      apiMessages.push({ role: "system", content: `【对话摘要】\n${parts.summary}` });
-    // 数据银行/聊天附件(酒馆 Data Bank):续写同样注入
-    const attBlock = buildAttachmentBlock(conv);
-    if (attBlock) apiMessages.push({ role: "system", content: attBlock });
+      userContent: "(请从最后一句继续刚才的回复,保持语气与视角,直接续写不要解释)",
+    });
     // 双记忆槽(26)+ 作者注四维(酒馆 note:depth/position/role)
     if (conv.note?.trim()) {
       const withNote = injectAuthorNote(apiMessages, {
@@ -1102,28 +1038,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     }
 
     const sampler = settingsStore.samplerPresets.find((p) => p.id === conv.samplerPresetId);
-    const pick = (
-      k:
-        | "temperature"
-        | "top_p"
-        | "top_k"
-        | "repetition_penalty"
-        | "frequency_penalty"
-        | "presence_penalty"
-        | "min_p"
-        | "mirostat"
-        | "mirostat_tau"
-        | "mirostat_eta"
-        | "dry_multiplier"
-        | "dry_base"
-        | "dry_allowed_length"
-        | "dry_penalty_last_n"
-    ): number | null => {
-      if (sampler && sampler[k] != null) return sampler[k] as number;
-      if (model.parameters && model.parameters[k] != null) return model.parameters[k] as number;
-      const d = settingsStore.defaultParameters[k];
-      return d != null ? d : null;
-    };
+    const pick = makeSamplerPicker(sampler, model.parameters, settingsStore.defaultParameters);
 
     const requestId = uuid();
     const updated = {
@@ -1251,19 +1166,18 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       charStore.personas.find((p) => p.id === conv.persona_id) ||
       charStore.getActivePersona() ||
       null;
-    const activeIds = new Set([
-      ...charStore.enabledLorebookIds,
-      ...(persona?.lorebookIds || []),
-      ...(conv.lorebookIds || []),
-    ]);
-    // 群聊:各角色卡绑定的独立世界书合并(角色级)
-    for (const c of cards) {
-      for (const id of c.lorebookIds || []) activeIds.add(id);
-    }
-    const books = [
-      charStore.globalLorebook,
-      ...[...activeIds].map((id) => charStore.lorebooks[id]),
-    ].filter((b) => !!b) as NonNullable<(typeof cards)[0]["character_book"]>[];
+    // 群聊:各角色卡绑定的独立世界书一并合并(角色级);不注入单个角色的内嵌书
+    const books = collectLorebooks({
+      globalLorebook: charStore.globalLorebook,
+      card: {
+        character_book: undefined,
+        lorebookIds: cards.flatMap((c) => c.lorebookIds || []),
+      },
+      enabledIds: charStore.enabledLorebookIds,
+      personaIds: persona?.lorebookIds || [],
+      convIds: conv.lorebookIds || [],
+      byId: charStore.lorebooks,
+    });
 
     // 手动模式:activeCharId 角色回复;自动模式:AI 自选角色
     const auto = conv.autoRespond === true;
@@ -1305,11 +1219,17 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         card: activeCard,
         persona,
         preset,
-        lorebooks: [
-          charStore.globalLorebook,
-          activeCard.character_book,
-          ...[...activeIds].map((id) => charStore.lorebooks[id]),
-        ].filter((b) => !!b) as NonNullable<typeof activeCard.character_book>[],
+        lorebooks: collectLorebooks({
+          globalLorebook: charStore.globalLorebook,
+          card: {
+            character_book: activeCard.character_book,
+            lorebookIds: cards.flatMap((c) => c.lorebookIds || []),
+          },
+          enabledIds: charStore.enabledLorebookIds,
+          personaIds: persona?.lorebookIds || [],
+          convIds: conv.lorebookIds || [],
+          byId: charStore.lorebooks,
+        }),
         recentMessages: conv.messages,
         currentInput: content,
         summary: conv.summary,
@@ -1325,48 +1245,20 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     }
 
     const sampler = settingsStore.samplerPresets.find((p) => p.id === conv.samplerPresetId);
-    const pick = (
-      k:
-        | "temperature"
-        | "top_p"
-        | "top_k"
-        | "repetition_penalty"
-        | "frequency_penalty"
-        | "presence_penalty"
-        | "min_p"
-        | "mirostat"
-        | "mirostat_tau"
-        | "mirostat_eta"
-        | "dry_multiplier"
-        | "dry_base"
-        | "dry_allowed_length"
-        | "dry_penalty_last_n"
-    ): number | null => {
-      if (sampler && sampler[k] != null) return sampler[k] as number;
-      if (model.parameters && model.parameters[k] != null) return model.parameters[k] as number;
-      const d = settingsStore.defaultParameters[k];
-      return d != null ? d : null;
-    };
+    const pick = makeSamplerPicker(sampler, model.parameters, settingsStore.defaultParameters);
 
     // 三段式(DeepSeek 缓存核心):stableSystem 前缀 + 历史 + 世界书/摘要尾部 + user 最后
-    const apiMessages: Pick<Message, "role" | "content">[] = [
-      { role: "system", content: stableSystem },
-      // 钉住区(40):常驻上下文,群聊同样生效
-      ...(conv.pinned?.trim()
-        ? [{ role: "system" as const, content: `【钉住】\n${conv.pinned.trim()}` }]
-        : []),
-      ...conv.messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
-    if (lorebook)
-      apiMessages.push({
-        role: "system",
-        content: auto ? `【世界观设定】\n${lorebook}` : lorebook,
-      });
-    if (summaryPart) apiMessages.push({ role: "system", content: `【对话摘要】\n${summaryPart}` });
-    // 数据银行/聊天附件(酒馆 Data Bank):群聊同样注入
-    const attBlock = buildAttachmentBlock(conv);
-    if (attBlock) apiMessages.push({ role: "system", content: attBlock });
-    apiMessages.push({ role: "user", content });
+    const apiMessages = assembleApiMessages({
+      stableSystem,
+      pinned: conv.pinned, // 钉住区(40):常驻上下文,群聊同样生效
+      history: conv.messages,
+      // 自动模式的设定块自带标题,手动模式沿用原文
+      lorebook: auto && lorebook ? `【世界观设定】\n${lorebook}` : lorebook,
+      summary: summaryPart,
+      // 数据银行/聊天附件(酒馆 Data Bank):群聊同样注入
+      attachmentBlock: buildAttachmentBlock(conv),
+      userContent: content,
+    });
     // 双记忆槽(26)+ 作者注四维(酒馆 note:depth/position/role)
     if (conv.note?.trim()) {
       const withNote = injectAuthorNote(apiMessages, {
