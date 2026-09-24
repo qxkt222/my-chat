@@ -46,6 +46,9 @@ export default function App() {
       mq.addEventListener("change", apply);
       return () => mq.removeEventListener("change", apply);
     }
+    // 显式返回：noImplicitReturns 要求所有分支同形。
+    // 亮/暗两分支本就没有监听器要摘，等价于「无清理函数」。
+    return undefined;
   }, [theme]);
 
   // Bootstrap data + parallel load for speed

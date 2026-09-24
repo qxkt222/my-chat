@@ -1312,7 +1312,11 @@ export const useTavernStore = create<TavernState>((set, get) => ({
           // 自动模式:鲁棒解析归属角色(多格式+模糊匹配;失败智能回退)。
           // 纯响应后处理,不碰三段式前缀 → 零缓存影响。
           // 响应后处理钩子(插件 afterResponse):落盘前应用
-          let final = { ...m, content: pluginAPI.executeAfterResponse(m.content), error: errText || m.error };
+          let final = {
+            ...m,
+            content: pluginAPI.executeAfterResponse(m.content),
+            error: errText || m.error,
+          };
           if (auto) {
             const parsed = parseGroupOwner(
               m.content,

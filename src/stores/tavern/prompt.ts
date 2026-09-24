@@ -34,7 +34,6 @@ export function buildAttachmentBlock(conv: TavernConversation): string {
   const atts = (conv.attachments || []).filter((a) => a.name.trim() && a.content.trim());
   if (atts.length === 0) return "";
   return (
-    `【数据银行 / 聊天附件】\n` +
-    atts.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
+    `【数据银行 / 聊天附件】\n` + atts.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
   );
 }

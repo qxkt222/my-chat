@@ -11,7 +11,6 @@ import {
   Play,
 } from "lucide-react";
 import type { Message } from "@/types";
-import { useChatStore } from "@/stores/useChatStore";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { applyRegexRules } from "@/lib/regex-format";

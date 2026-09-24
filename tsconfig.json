@@ -1,4 +1,5 @@
 {
+  "//": "严格度说明（2026-09-25 最严健康度审查）：noPropertyAccessFromIndexSignature(TS4111) 经探针实测会报 163 处，全部是索引签名下的 obj.k 写法；本项目持久化层大量按动态 key 读配置/预设，改成 obj[k] 是零类型收益的机械改写，故不启用并在闸门文档中如实记录为「未启用」而非「全绿」。",
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -16,6 +17,10 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {

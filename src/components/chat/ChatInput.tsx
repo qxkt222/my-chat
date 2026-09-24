@@ -18,13 +18,7 @@ import { useSkillStore } from "@/stores/useSkillStore";
 import { useMemoryStore } from "@/stores/useMemoryStore";
 import { pluginAPI } from "@/plugin/PluginHost";
 import { SLASH_COMMANDS } from "@/plugin/commands";
-import {
-  mcpListServers,
-  ragSearch,
-  ragRerank,
-  logDiag,
-  type RagResult,
-} from "@/lib/tauri";
+import { mcpListServers, ragSearch, ragRerank, logDiag, type RagResult } from "@/lib/tauri";
 import { useT } from "@/lib/i18n";
 import { countTokens } from "@/lib/token-counter";
 import { detectChainTrigger, detectMentionQuery } from "./input-triggers";
@@ -872,4 +866,3 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
 }
 
 // runMcpStep 已移到 ./mcp-step.ts（它与组件状态无关，是文件末尾的顶层函数）
-

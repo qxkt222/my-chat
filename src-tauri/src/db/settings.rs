@@ -18,10 +18,8 @@ pub fn save_model(m: &ModelConfig) -> Result<(), String> {
     // 加密失败时**保留原值**，不写入空串 —— 静默丢 key 是旧实现最坏的毛病
     // （失败原因已由 encryption 层落到 chat_errors.log）
     let encrypted = if !m.api_key_encrypted.is_empty() && !m.api_key_encrypted.starts_with("ENC:") {
-        encryption::encrypt(&m.api_key_encrypted).map_or_else(
-            |_| m.api_key_encrypted.clone(),
-            |enc| format!("ENC:{enc}"),
-        )
+        encryption::encrypt(&m.api_key_encrypted)
+            .map_or_else(|_| m.api_key_encrypted.clone(), |enc| format!("ENC:{enc}"))
     } else {
         m.api_key_encrypted.clone()
     };

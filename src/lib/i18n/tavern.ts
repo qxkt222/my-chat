@@ -223,7 +223,10 @@ export const tavernMessages: Record<string, Record<string, string>> = {
   "tavern.groupNew": { zh: "新建群聊", en: "New Group Chat" },
   "tavern.groupSection": { zh: "群聊", en: "Group Chats" },
   "tavern.variables": { zh: "消息变量（{{var::name}}）", en: "Message Variables ({{var::name}})" },
-  "tavern.attachments": { zh: "数据银行 / 聊天附件（发送时注入）", en: "Data Bank / Attachments (injected on send)" },
+  "tavern.attachments": {
+    zh: "数据银行 / 聊天附件（发送时注入）",
+    en: "Data Bank / Attachments (injected on send)",
+  },
   "tavern.groupHint": {
     zh: "(≥2 个角色;可选手动指定发言或 AI 自动轮转)",
     en: "(≥2 chars; pick who replies or let AI auto-respond)",

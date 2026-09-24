@@ -610,3 +610,116 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 - `flushPendingStreams` 有意留在 `useChatStore` 内：它依赖 `useChatStore.setState`，搬出去会形成循环依赖。
 
 **口径提醒**：本节行数为 `(Get-Content).Count` 口径，与探针的 `split("\n").length` 相差 1，按 §7.9 的约定记。
+
+---
+
+### 7.11 最严健康度审查（2026-09-25，全部实测）
+
+> 起因：开发者要求「用最严格的健康度测试进行测试」。先查清「最严」在本项目指什么 ——
+> 不是通用清单，而是 §7 这套自订标准的加严版，**再补上 Tauri 桌面应用特有、而此前一个都没跑的项**。
+>
+> **本轮最重的一条发现写在最前面：标准行里的两项从来没有闸门。**
+
+#### 7.11.1 文档承诺 ≠ 闸门（本轮的核心教训）
+
+`§健康度加强审查(2026-08-13)` 的标准行写着「prettier 全绿 · fmt 0 diff」。
+本轮逐条核对 `scripts/gate.mjs`：**里面既没有 prettier 也没有 cargo fmt**。
+于是同一个仓库里，文档连着几轮宣布这两项全绿，而实测是：
+
+| 项 | 接线前实测 | 现在 |
+|---|---|---|
+| `prettier --check` | **42 个文件不合格**，退出码 1 | 0，已接成 `gate format` |
+| `cargo fmt --check` | **有 diff**（`encryption.rs:114` 起） | 0，已接成 `gate rustfmt` |
+| `eslint --max-warnings 0` | 3 条警告，但闸门基线写的是「≤4」→ **绿灯** | 0/0，闸门已加 `--max-warnings 0` |
+
+**结论**：写进标准行的每一个读数，都必须有一道能变红的闸门兜着；否则它只是文档里的一句话。
+（同型前科：clippy 不带 `-D warnings` 时警告不改退出码，§7.5 已记。）
+
+**闸门不是写完就算，本轮对它做了证伪测试**：故意把源文件改坏 / 把覆盖率阈值抬到 99%，
+新接的 `format`、`rustfmt`、`coverage` 三道闸门都**真的变红**（exit 1，断言报「实测 2」「实测 1」、
+`ERROR: Coverage ... does not meet global threshold`），还原后回绿且文件字节级一致。
+判据能被证伪，才算判据 —— 这条在 AGENTS.md 里已立，本轮是首次对闸门本身执行。
+
+#### 7.11.2 前端静态严格度
+
+- `tsconfig.json` 补四项：`noImplicitOverride` / `noImplicitReturns` / `allowUnreachableCode: false` /
+  `allowUnusedLabels: false`。补之前用探针实测：**五项全开报 167 条**，其中 **163 条是 `TS4111`**。
+- `noPropertyAccessFromIndexSignature`（TS4111）**有意不启用**：163 处全是索引签名下的 `obj.k` 写法，
+  本项目持久化层大量按动态 key 读配置/预设，改成 `obj[k]` 是零类型收益的机械改写。
+  理由写在 `tsconfig.json` 的 `"//"` 字段里 —— 记「未启用」，不记「全绿」。
+- 真正修掉的 5 处（3 文件）：`ErrorBoundary.tsx` 的 `state`/`render` 补 `override`、
+  `App.tsx` 与 `CommandPalette.tsx` 的 effect 分支补显式 `return undefined`。
+  **全部按语义修，无一处 `as any` / `@ts-expect-error`。**
+
+#### 7.11.3 依赖安全（两个工具都是本轮才装上）
+
+- `npm audit`：**淘宝镜像的 `/-/npm/v1/security/*` 返回 404 NOT_IMPLEMENTED —— 该能力不存在**。
+  换 `--registry=https://registry.npmjs.org` + 本机代理后真跑通：**417 个依赖，0 漏洞**，exit 0。
+  ⚠️ 注意这不是「镜像也没问题」，而是「对着镜像跑等于没跑」。
+- `cargo audit`（0.22.2，本轮 `cargo install`）：**3 个漏洞 + 9 条 warning**。
+  漏洞与修复版本逐条读本地 RustSec 库（`~/.cargo/advisory-db`）确认：
+
+  | 漏洞 | 当前 | 修复版 | 来源 | 判读 |
+  |---|---|---|---|---|
+  | `RUSTSEC-2026-0187` lopdf | 0.34.0 | **≥ 0.42.0** | **直接依赖** `pdf-extract` | **真风险**：~21KB 恶意 PDF（Catalog 内 ~10000 层嵌套数组）→ 栈溢出 SIGABRT，`catch_unwind` 接不住 |
+  | `RUSTSEC-2026-0258` h2 | 0.4.15 | ≥ 0.4.16 | `reqwest→hyper` | 低危 DoS，差一个补丁版 |
+  | `RUSTSEC-2026-0285` rustls | 0.23.42 | ≥ 0.23.45 | Tauri 依赖树 | CVSS `C:L`，说明书明言无法用于改写/完成握手 |
+
+  9 条 warning 全是 `unmaintained`/`unsound` 且都在传递依赖里（`unic-*` 一组经 `selectors` 进来；
+  `glib` 是 Linux 专属，Windows 构建不参与）。
+- `cargo tree -d`：58 个重复条目 / **27 个 crate 名** / **8 个跨主版本共存**
+  （`syn 2.0.119 + 3.0.2`、`bitflags`、`indexmap`、`thiserror`、`toml`、`winnow` 等）——
+  均为上游传递依赖的正常共存，非本仓库可直接消除的问题。
+  ⚠️ 口径：58 是**条目数**不是 crate 数，只看这个数会虚报。
+
+#### 7.11.4 真实产物（本轮首次产出安装包）
+
+- `target/release/my-chat.exe` 此前是 **2026-08-12** 的陈旧产物（源码已到 09-24），
+  `target/release/bundle/` **目录根本不存在** —— 即从未在最终代码上验过产物。
+- 本轮 `tauri build`：release 冷构建 **6m08s**，最后一步失败：`Couldn't find a .ico icon`。
+  → **归因订正**：`.ico` 是存在的（`src-tauri/icons/icon.ico`，1956B，目录共 19 项），
+  真正原因是 `tauri.conf.json` 的 `bundle` 段只有 `active`、**没有 `icon` 字段**。
+  （过程中的一次误判：`Get-ChildItem` 的格式化输出把非 ASCII 列吃成空行，我据此说了「图标不存在」，
+  随后用 `node fs.readdirSync` 复核才发现。教训：**「文件不存在」的结论必须用能打印字节数的通道复核**。）
+- 补 `bundle.icon` 后打包成功，**产出两个安装包**（首次）：
+  - `target/release/bundle/msi/My Chat_0.2.0_x64_en-US.msi` — 4.82 MiB
+  - `target/release/bundle/nsis/My Chat_0.2.0_x64-setup.exe` — 3.45 MiB
+  - `my-chat.exe` — 13.13 MiB（mtime 与本轮构建一致）
+  - `target/` 已被 `.gitignore` 覆盖（`git check-ignore` 实测 exit 0），产物不会误入库。
+- **release-only 警告**：`#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` 原先挂在
+  `fn main` 上，rustc 报 `unused_attributes`（它作用于函数而非 crate，实际不生效）。
+  已改为文件首行的 crate 级 `#![...]` —— 内部属性必须在任何条目之前，放错位置同样是错的。
+  这类警告 **`clippy --all-targets` 看不见**（dev profile），只有真跑 release 才暴露：
+  release 重编后警告 **1 → 0**。
+- **运行时实测**：启动本轮产出的 exe → 进程存活 14s、`startup.marker` 刷新为新纪元值、
+  `chat_errors.log` 字节数 **2373 → 2373（零新增）**，随后干净退出。
+
+#### 7.11.5 覆盖率（此前无此能力）
+
+`@vitest/coverage-v8` 本轮才装。实测（25 个文件）：
+
+```
+lines 60.46% · statements 58.55% · functions 49.6% · branches 52%
+最低：lib/tauri.ts 1.6%（纯 IPC 转发，单测天然覆盖不到）· useAppConfigStore.ts 16.66% · character-card.ts 29.48%
+```
+
+阈值（`vite.config.ts` → `test.coverage.thresholds`）按实测**下留约 2 点**设为
+`lines 58 / statements 56 / functions 47 / branches 50`：**这是地板不是目标**，
+作用是拦断崖式倒退，不是把门焊死；要提高得先补测试再抬阈值，顺序不能反。
+`assert-coverage` 另独立复核四项读数（只看退出码的话，阈值被谁删掉都没人发现）。
+
+⚠️ **同一份覆盖率的两个读数（已实测，不是 bug）**：控制台 `All files` 行报 `branches 52.24`，
+而 `coverage-summary.json` 报 `52`（istanbul 经典口径 `covered/total = 440/846 = 52.0046` 被 floor）。
+断言**故意**读结构化 JSON（字段稳定、可编程读，不依赖表格排版），代价是比控制台低不到 1 个点。
+
+#### 7.11.6 本轮闸门终态与口径
+
+`gate all` 序列现为 **7 道**：`typecheck → lint → format → rustfmt → test → coverage → build`，
+外加 `assert-*` 行为型断言（git / tests / lint / format / rustfmt / coverage / build）。
+完整回归实测：**exit 0，前端 72/72 用例**。
+
+**本轮所有读数来源**：`gate.mjs` 各闸门、`cargo build --release`、`tauri build`、
+`npm audit`（官方 registry）、`cargo audit`（本地 RustSec 库）、`coverage-summary.json`、
+`node fs.*` 直读盘面、以及启动产物后的 `startup.marker` / `chat_errors.log`。
+**未跑**：`npm outdated` 全量升级评估、跨平台构建、安装包安装后行为 —— 本轮不做，如实记未跑。
+

@@ -66,7 +66,12 @@ function entryMatches(
 }
 
 /** 字面量匹配(含全词边界;全词匹配只对 ASCII 词生效,中文无词边界退化为包含) */
-function literalMatch(key: string, text: string, caseSensitive: boolean, wholeWords?: boolean): boolean {
+function literalMatch(
+  key: string,
+  text: string,
+  caseSensitive: boolean,
+  wholeWords?: boolean
+): boolean {
   if (wholeWords && /^[A-Za-z0-9_]+$/.test(key)) {
     // 词边界匹配:转义关键词避免正则特殊字符,首尾 \b
     const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -76,7 +81,12 @@ function literalMatch(key: string, text: string, caseSensitive: boolean, wholeWo
 }
 
 /** 关键词在文本中的出现次数(最小激活计数;全词匹配下按词边界计) */
-function countOccurrences(key: string, text: string, caseSensitive: boolean, wholeWords?: boolean): number {
+function countOccurrences(
+  key: string,
+  text: string,
+  caseSensitive: boolean,
+  wholeWords?: boolean
+): number {
   if (wholeWords && /^[A-Za-z0-9_]+$/.test(key)) {
     const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`\\b${esc}\\b`, caseSensitive ? "g" : "gi");
@@ -195,8 +205,12 @@ export function collectLorebookTextWithTimed(
             const t = k.trim();
             return (
               t !== "" &&
-              countOccurrences(t, scanText, e.case_sensitive === true, e.match_whole_words === true) >=
-                minAct
+              countOccurrences(
+                t,
+                scanText,
+                e.case_sensitive === true,
+                e.match_whole_words === true
+              ) >= minAct
             );
           });
         })();
@@ -224,8 +238,7 @@ export function collectLorebookTextWithTimed(
         roundHits.push({ order: e.insertion_order ?? 0, content: e.content });
         // 定时世界书:命中条目按 sticky/cooldown 标记追踪(供会话持久化)
         if (e.sticky === true) stickyHits.push(e.content);
-        if (typeof e.cooldown === "number" && e.cooldown > 0)
-          cooldownHits[e.content] = e.cooldown;
+        if (typeof e.cooldown === "number" && e.cooldown > 0) cooldownHits[e.content] = e.cooldown;
       }
     }
 
@@ -256,8 +269,7 @@ export function collectLorebookTextWithTimed(
         matchedContents.add(e.content);
         added.push({ order: e.insertion_order ?? 0, content: e.content });
         if (e.sticky === true) stickyHits.push(e.content);
-        if (typeof e.cooldown === "number" && e.cooldown > 0)
-          cooldownHits[e.content] = e.cooldown;
+        if (typeof e.cooldown === "number" && e.cooldown > 0) cooldownHits[e.content] = e.cooldown;
       }
       if (added.length === 0) break;
       roundHits = roundHits.concat(added);
@@ -307,15 +319,15 @@ function swapVars(text: string, vars: Record<string, string>): string {
  * 在既有 {{char}}/{{user}} 等替换之后应用;未定义的变量替换为空串。
  * 纯函数,方便单测。
  */
-export function resolveVarMacros(
-  text: string,
-  vars: Record<string, string> | undefined
-): string {
+export function resolveVarMacros(text: string, vars: Record<string, string> | undefined): string {
   if (!text || !vars) return text;
-  return text.replace(/\{\{var::([^}]+)\}\}|\{\{getvar::([^}]+)\}\}/g, (_m, a: string, b: string) => {
-    const key = (a || b || "").trim();
-    return key ? vars[key] ?? "" : "";
-  });
+  return text.replace(
+    /\{\{var::([^}]+)\}\}|\{\{getvar::([^}]+)\}\}/g,
+    (_m, a: string, b: string) => {
+      const key = (a || b || "").trim();
+      return key ? (vars[key] ?? "") : "";
+    }
+  );
 }
 
 /**
@@ -370,9 +382,7 @@ export function buildGroupSystemParts(ctx: {
     "2. 回复必须以 `【角色名】` 开头(角色名取自上面的角色列表),然后才是内容。",
     "3. 必要时可描写动作/神态,但不要替其他角色或 {{user}} 说话。",
     `4. 你是 ${user} 的对话对象。`,
-    ...(ctx.queueCharName
-      ? [`5. 这一轮轮到 ${ctx.queueCharName} 发言,其他角色不要抢话。`]
-      : []),
+    ...(ctx.queueCharName ? [`5. 这一轮轮到 ${ctx.queueCharName} 发言,其他角色不要抢话。`] : []),
   ]
     .filter(Boolean)
     .join("\n");
@@ -536,8 +546,7 @@ export function injectAuthorNote(
   if (!note || !note.text?.trim()) return messages;
   const text = note.text.trim();
   const role = note.role || "system";
-  const content =
-    role === "system" ? `【作者注】\n${text}` : text;
+  const content = role === "system" ? `【作者注】\n${text}` : text;
   const base = { role, content } as const;
 
   if (note.position === "in_chat") {

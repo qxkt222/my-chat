@@ -25,6 +25,20 @@ export default defineConfig({
     //    47 个组件对 6 个测试文件的落差有一半来自这里，不是「懒得写」。
     environment: "node",
     include: ["**/*.test.{ts,tsx}"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      // 2026-09-25 最严健康度审查实测基线：
+      //   lines 60.46 · statements 58.55 · functions 49.6 · branches 52（25 个文件）
+      // 阈值 = 地板，不是目标：设成「比实测低约 2 个点」，作用是拦住断崖式倒退，
+      // 而不是把门焊死。真要提高得先补测试，再抬这里 —— 顺序不能反。
+      thresholds: {
+        lines: 58,
+        statements: 56,
+        functions: 47,
+        branches: 50,
+      },
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
 });

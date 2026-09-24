@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { Plus, Folder, FileText, Trash2, Save, Search, Upload, BadgeCheck, Sparkles } from "lucide-react";
+import {
+  Plus,
+  Folder,
+  FileText,
+  Trash2,
+  Save,
+  Search,
+  Upload,
+  BadgeCheck,
+  Sparkles,
+} from "lucide-react";
 import { useKnowledgeStore } from "@/stores/useKnowledgeStore";
 import { useT } from "@/lib/i18n";
 import {

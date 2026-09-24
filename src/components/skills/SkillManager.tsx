@@ -148,8 +148,7 @@ export function SkillManager() {
                 )}
                 {parseJsonArray(skill.memory_tags).length > 0 && (
                   <span className="flex items-center gap-0.5">
-                    <Brain className="w-2.5 h-2.5" />{" "}
-                    {parseJsonArray(skill.memory_tags).join("、")}
+                    <Brain className="w-2.5 h-2.5" /> {parseJsonArray(skill.memory_tags).join("、")}
                   </span>
                 )}
               </div>

@@ -114,16 +114,21 @@ pub fn decrypt(encoded: &str) -> Result<String, String> {
     if encoded.is_empty() {
         return Ok(String::new());
     }
-    let bytes = STANDARD
-        .decode(encoded)
-        .map_err(|e| fail(&format!("API key 密文不是合法 base64（该 key 需重新输入）: {e}")))?;
+    let bytes = STANDARD.decode(encoded).map_err(|e| {
+        fail(&format!(
+            "API key 密文不是合法 base64（该 key 需重新输入）: {e}"
+        ))
+    })?;
     let dec = win::unprotect(&bytes).map_err(|e| {
         fail(&format!(
             "DPAPI 解密失败（换 Windows 账户或重装系统后旧密文解不开，该 key 需重新输入）: {e}"
         ))
     })?;
-    String::from_utf8(dec)
-        .map_err(|e| fail(&format!("API key 明文不是合法 UTF-8（该 key 需重新输入）: {e}")))
+    String::from_utf8(dec).map_err(|e| {
+        fail(&format!(
+            "API key 明文不是合法 UTF-8（该 key 需重新输入）: {e}"
+        ))
+    })
 }
 
 /// 失败统一落盘到 `chat_errors.log` —— 否则「key 没了」这件事查无可查。

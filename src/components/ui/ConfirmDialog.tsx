@@ -84,9 +84,7 @@ export function ConfirmDialogHost() {
         className="w-[380px] max-w-[90vw] bg-card border border-border rounded-lg shadow-xl p-4"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="text-sm text-foreground mb-3 whitespace-pre-wrap break-words">
-          {st.message}
-        </p>
+        <p className="text-sm text-foreground mb-3 whitespace-pre-wrap break-words">{st.message}</p>
         {st.mode === "prompt" && (
           <input
             autoFocus

@@ -1,3 +1,9 @@
+// release 构建不带控制台窗口 —— 必须是 crate 级内部属性（带 !），且必须出现在
+// 任何条目之前。原先写成挂在 fn main 上的外部属性，rustc 报 unused_attributes：
+// 它作用于函数而非 crate，实际不生效。这条只在 release 构建时出现，
+// clippy --all-targets（dev profile）看不到它 —— 所以只有真跑 release 才暴露。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod adapters;
 mod commands;
 mod db;
@@ -270,7 +276,6 @@ fn get_db_status() -> Result<String, String> {
     .to_string())
 }
 
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() {
     run();
 }
@@ -296,12 +301,22 @@ mod guard_tests {
     fn guard_rejects_paths_outside_app_dir() {
         ensure_root();
 
-        let outside = if cfg!(windows) { "C:/Windows/System32" } else { "/etc" };
-        assert!(guard_path(outside).is_err(), "应用数据目录之外的绝对路径应被拒绝");
+        let outside = if cfg!(windows) {
+            "C:/Windows/System32"
+        } else {
+            "/etc"
+        };
+        assert!(
+            guard_path(outside).is_err(),
+            "应用数据目录之外的绝对路径应被拒绝"
+        );
 
         // 用 .. 从根目录爬出去（app_data_dir/../../.. 落到用户目录）
         let climb = format!("{}/../../..", app_data_dir().to_string_lossy());
-        assert!(guard_path(&climb).is_err(), "含 .. 爬出根目录的路径应被拒绝");
+        assert!(
+            guard_path(&climb).is_err(),
+            "含 .. 爬出根目录的路径应被拒绝"
+        );
     }
 
     /// 根目录内的路径必须放行 —— 否则守卫会把正常功能一起挡掉。

@@ -22,3 +22,5 @@ Thumbs.db
 .vitest-report.json
 src/.vitest-report.json
 .gate-tmp/
+# 覆盖率报告（vitest --coverage 产物，2026-09-25 接线时补）
+coverage/

@@ -165,8 +165,9 @@ describe("injectAuthorNote 作者注四维", () => {
 
 describe("resolveVarMacros 消息变量", () => {
   it("{{var::name}} / {{getvar::name}} 替换,未定义为空串", () => {
-    expect(resolveVarMacros("我是{{var::npc}},遇到{{getvar::place}}", { npc: "老村长", place: "酒馆" }))
-      .toBe("我是老村长,遇到酒馆");
+    expect(
+      resolveVarMacros("我是{{var::npc}},遇到{{getvar::place}}", { npc: "老村长", place: "酒馆" })
+    ).toBe("我是老村长,遇到酒馆");
     expect(resolveVarMacros("x{{var::missing}}y", {})).toBe("xy");
   });
 
@@ -199,20 +200,16 @@ describe("collectLorebookTextWithTimed 定时世界书", () => {
     expect(r1.text).toContain("王座条目");
     expect(r1.cooldownHits["王座条目"]).toBe(2);
     // 第二轮:上一轮 cooldown=2 → 递减为 1,仍在冷却 → 关键词不命中也不注入
-    const r2 = collectLorebookTextWithTimed(
-      books,
-      [{ role: "user", content: "见王" }],
-      "",
-      { stickyContents: [], cooldownLeft: r1.cooldownHits }
-    );
+    const r2 = collectLorebookTextWithTimed(books, [{ role: "user", content: "见王" }], "", {
+      stickyContents: [],
+      cooldownLeft: r1.cooldownHits,
+    });
     expect(r2.text).not.toContain("王座条目");
     // 第三轮:递减为 0 → 恢复命中
-    const r3 = collectLorebookTextWithTimed(
-      books,
-      [{ role: "user", content: "见王" }],
-      "",
-      { stickyContents: [], cooldownLeft: r2.cooldownHits }
-    );
+    const r3 = collectLorebookTextWithTimed(books, [{ role: "user", content: "见王" }], "", {
+      stickyContents: [],
+      cooldownLeft: r2.cooldownHits,
+    });
     expect(r3.text).toContain("王座条目");
   });
 
