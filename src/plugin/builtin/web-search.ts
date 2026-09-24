@@ -1,7 +1,7 @@
 // plugin/builtin/web-search.ts — Web search plugin (本机 SearXNG)
 //
 // 弃用废弃的 DuckDuckGo Instant Answer API,改接本机 SearXNG 栈
-// (D:\1233344\search-stack,端口 8888,走代理)。搜索失败时回退
+// (本机 SearXNG 栈,默认端口 8888,走代理)。搜索失败时回退
 // DuckDuckGo HTML 接口,尽量保证可用。
 
 import type { ChatPlugin } from "../types";

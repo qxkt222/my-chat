@@ -24,7 +24,7 @@ pub async fn translate_text(
     }
 }
 
-/// 构造 HTTP `客户端;proxy_url` 非空时走代理(国内访问 Google 必需,如 <http://127.0.0.1:23385>)
+/// 构造 HTTP `客户端;proxy_url` 非空时走代理(国内访问 Google 必需,如 <http://127.0.0.1:7890>)
 fn build_client(proxy_url: &str) -> Result<Client, String> {
     let mut b = Client::builder();
     let p = proxy_url.trim();

@@ -8,7 +8,7 @@ interface TranslateState {
   engine: TranslateEngine;
   deeplKey: string;
   libreUrl: string;
-  /** 可选 HTTP 代理(国内访问 Google 翻译必需,如 http://127.0.0.1:16210);空 = 直连 */
+  /** 可选 HTTP 代理(国内访问 Google 翻译必需,如 http://127.0.0.1:7890);空 = 直连 */
   proxyUrl: string;
   loaded: boolean;
   load: () => Promise<void>;

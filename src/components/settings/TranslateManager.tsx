@@ -78,13 +78,13 @@ export function TranslateManager() {
         </div>
       )}
 
-      {/* 代理:国内访问 Google/DeepL 必需(与 SearXNG 同款飞鸟代理) */}
+      {/* 代理:国内访问 Google/DeepL 必需(与 SearXNG 用同一个本地代理) */}
       <div className="flex items-center gap-2">
         <label className="text-xs text-muted-foreground w-24">{t("translate.proxy")}:</label>
         <input
           value={store.proxyUrl}
           onChange={(e) => store.setProxyUrl(e.target.value)}
-          placeholder="http://127.0.0.1:16210(留空 = 直连)"
+          placeholder="http://127.0.0.1:7890(留空 = 直连)"
           className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded"
         />
         <span className="text-[10px] text-muted-foreground">{t("translate.proxyHint")}</span>

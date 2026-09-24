@@ -245,7 +245,7 @@
   - **DeepSeek 强缓存优化（三段式结构,命中率 80-90%+）**：诊断出根因——世界书拼在 system **中间**导致前缀随对话失效；改造为 `buildRpSystemParts` 三段式（stableSystem 前缀恒定 + 世界书/摘要尾部可变）,messages 结构 = system(stable) + 历史 + 世界书/摘要尾部 + user 最后,三条发送链路（tavern 单聊/群聊/swipe 重放 + 工作 RP）全改；`collectLorebookText` 概率注入改**确定性 hash**（去 Math.random,同输入同结果）;缓存命中率 toast 保留 + 新增 `useCacheStatsStore` 诊断（最近 100 条,localStorage）
   - **缓存诊断面板**：设置页「缓存」tab——平均命中率大数字 + 最近 20 次趋势条（≥80 绿/≥50 黄/红）+ 结构提示（世界书已尾部化/避免 {{time}}/概率设 100）
   - **酒馆助手**（AI 创作 + 缓存小卡）：设置页「助手」tab——目标选择（角色卡/世界书/预设）+ 上下文自动拼入 + 快捷动作（写卡/生成世界书/优化预设/解释设置）+ 独立流生成;「一键应用」世界书条目（解析"关键词:内容"行写入）/ 预设保存为新预设 / 复制;顶部内嵌缓存命中率小卡
-  - **代理端口 23385 → 16210**：翻译代理提示 + SearXNG 配置同步更新并验证（Google 翻译 ✓ / 搜索 20 条 ✓）
+  - **代理端口调整**：翻译代理提示 + SearXNG 配置同步更新并验证（Google 翻译 ✓ / 搜索 20 条 ✓）
   - **设置按模式拆分**（用户痛点：模式都分开了设置还挤 17 个 tab）：`SettingsDialog` 按当前模式渲染 tab——工作模式=模型/通用/插件/知识库/适配器/MCP/技能/记忆 + 共用（数据/翻译/采样器）；酒馆模式=角色/世界书/预设/样式/缓存/助手 + 共用；切换模式自动重置默认 tab；标题「设置/酒馆设置」区分
   - **酒馆会话搜索 + 群聊归错优化**（纯交互层,零缓存影响）：左栏 RP 会话列表加搜索框（按标题/角色名过滤）；`parseGroupOwner` 群聊自动回应归属解析增强——支持【角色名】/角色名:/ *角色名* /(角色名)/开头模糊 5 种格式（8/8 单测通过）,失败智能回退 activeCharId→上一条 assistant 角色→cards[0],不碰三段式 stableSystem
   - **健康度大规模加固（疑点五回应,全部指标跑满）**：
@@ -415,7 +415,7 @@
 2. **确认跑的是新版本**：看 `startup.marker` 时间戳；release exe 才是独立可运行版（debug exe 依赖 vite）
 3. **ACL 是 Tauri 2 第一大坑**：`capabilities/` 缺失 → 事件监听静默失败，表现为"请求成功但没输出"
 4. **二进制排障**：sled db 是明文 JSON 存储，`strings -a -n 8 db` 可直接提取记录排查
-5. **SearXNG 搜索空结果**：本机 SearXNG（`D:\1233344\search-stack`）直连会被搜索引擎 CAPTCHA/429 拦截 → `searxng-local-settings.yml` 的 `outgoing.proxies` 配了 `http://127.0.0.1:23385`（飞鸟代理）。**必须先开代理再启动** `start-searxng.bat`，代理没开会搜不到；配置已备份（`*.yml.bak-*`）
+5. **SearXNG 搜索空结果**：本地 SearXNG 直连会被搜索引擎 CAPTCHA/429 拦截 → `searxng-local-settings.yml` 的 `outgoing.proxies` 需要配一个可用的 HTTP 代理（本机用的就是那个本地翻墙代理，端口见本机配置）。**必须先开代理再启动** `start-searxng.bat`，代理没开会搜不到；配置已备份（`*.yml.bak-*`）
 6. **PNG 角色卡导入失败**：确认卡是 V2/V3 格式（文件尾含 `chara_card_v2`/`chara_card_v3` 魔数）；老 tEXt 块卡（keyword=`chara`）有兜底但拿不到头像；解析是纯前端逻辑（`src/lib/character-card.ts`），可用临时脚本按同算法测 base64 样本
 
 ---
