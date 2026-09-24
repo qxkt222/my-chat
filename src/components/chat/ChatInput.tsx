@@ -25,11 +25,10 @@ import {
   logDiag,
   type RagResult,
 } from "@/lib/tauri";
-import type { McpServerDto } from "@/types";
 import { useT } from "@/lib/i18n";
 import { countTokens } from "@/lib/token-counter";
 import { detectChainTrigger, detectMentionQuery } from "./input-triggers";
-import { runMcpStep } from "./mcp-step";
+import { runMcpChain, runMcpStep } from "./mcp-step";
 import { AtMentionMenu, type MentionSelection, type AtMentionMenuHandle } from "./AtMentionMenu";
 import { setCodeInsertHandler } from "@/lib/code-insert";
 import { loadChains, runPromptChain, type PromptChain } from "@/lib/prompt-chain";
@@ -141,55 +140,10 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
         setToolStatus({ server: cmdRaw, tool: stage.split(" ")[0] || cmdRaw, stage });
 
       // MCP tool chain: /mcp <server> <tool> [argsJson] :: <tool2> [argsJson] :: ...
-      // Each step runs in order; "{prev}" in args references the previous output.
+      // 步骤解析与顺序执行已抽到 ./mcp-step.ts 的 runMcpChain
       if (cmdRaw.toLowerCase() === "mcp" && args) {
         try {
-          setStage(t("tool.initialize"));
-          const servers = await mcpListServers();
-          const steps = args
-            .split("::")
-            .map((s) => s.trim())
-            .filter(Boolean);
-          if (steps.length === 0) {
-            result = t("chat.mcpUsage");
-          } else {
-            const outputs: string[] = [];
-            let prev = "";
-            let firstServer = true;
-            let chainServer: McpServerDto | null = null;
-            for (const step of steps) {
-              const [toolName, ...argParts] = step.split(/\s+/);
-              const argText = argParts.join(" ").trim();
-              const toolNameSafe = toolName ?? "";
-              // First step carries "server", later steps reuse it
-              let server: McpServerDto | null = chainServer;
-              if (firstServer) {
-                const [srv, toolRaw, ...rest] = step.split(/\s+/);
-                server = servers.find((s) => s.name.toLowerCase() === srv?.toLowerCase()) || null;
-                if (!server) {
-                  result = t("chat.mcpNotFound", {
-                    s: srv ?? "",
-                    list: servers.map((x) => x.name).join("、") || t("chat.mcpNone"),
-                  });
-                  break;
-                }
-                chainServer = server;
-                // Re-derive tool name & args since the first token was the server
-                const toolFirst = toolRaw ?? "";
-                const argFirst = rest.join(" ").trim();
-                if (!server) break;
-                setStage(`${t("tool.calling")} ${server.name}/${toolFirst}`);
-                outputs.push(await runMcpStep(server, toolFirst, argFirst, prev));
-              } else if (server) {
-                setStage(`${t("tool.calling")} ${server.name}/${toolNameSafe}`);
-                outputs.push(await runMcpStep(server, toolNameSafe, argText, prev));
-              }
-              prev = outputs[outputs.length - 1] ?? "";
-              firstServer = false;
-            }
-            setStage(t("tool.reading"));
-            result = outputs.join("\n\n---\n\n");
-          }
+          result = await runMcpChain(args, setStage);
         } catch (e) {
           result = `${t("chat.mcpCallFailed")}${e}`;
         } finally {

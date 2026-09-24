@@ -23,6 +23,9 @@ import {
   WORK_SUMMARIZE_THRESHOLD,
   WORK_TEMP_MODE_KEY,
 } from "./chat/utils";
+import { assembleRpMessages } from "./chat/rp-messages";
+// 世界书四源合并与酒馆共用同一份实现（含「群聊归组」那类约定），不再各写一遍
+import { collectLorebooks } from "./tavern/assembly";
 
 /** 流式 token 合帧(rAF):每个 requestId 待刷新的 token 累积,每帧最多一次 set。
  *   finish()/cancel 前需 flush 挂起帧,否则最后一批 token 会丢。 */
@@ -147,18 +150,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           charStore.getActivePersona() ||
           null;
         const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
-        const activeIds = new Set([
-          ...charStore.enabledLorebookIds,
-          ...(persona?.lorebookIds || []),
-          ...(conv.lorebookIds || []),
-          // 角色卡绑定的独立世界书(角色级,多选)
-          ...(card.lorebookIds || []),
-        ]);
-        const books = [
-          charStore.globalLorebook,
-          card.character_book,
-          ...[...activeIds].map((id) => charStore.lorebooks[id]),
-        ].filter((b) => !!b) as NonNullable<typeof card.character_book>[];
+        // 世界书四源合并复用酒馆那份实现（同一套优先级，不再各写一遍）
+        const books = collectLorebooks({
+          globalLorebook: charStore.globalLorebook,
+          card,
+          enabledIds: charStore.enabledLorebookIds,
+          personaIds: persona?.lorebookIds || [],
+          convIds: conv.lorebookIds || [],
+          byId: charStore.lorebooks,
+        });
         const parts = buildRpSystemParts({
           card,
           persona,
@@ -169,22 +169,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           currentInput: processedContent,
           summary: conv.summary,
         });
-        messages.push({ role: "system", content: parts.stableSystem });
-        for (const m of conv.messages) {
-          if (m.role !== "system") messages.push({ role: m.role, content: m.content });
-        }
-        if (parts.lorebook) messages.push({ role: "system", content: parts.lorebook });
-        if (parts.summary)
-          messages.push({ role: "system", content: `【对话摘要】\n${parts.summary}` });
-        // V3 扩展:深度提示词注入(对话到第 depth 条消息时激活;注入点固定文本恒定,
-        // 不破坏三段式缓存前缀)
-        if (parts.depthPrompt && conv.messages.length >= parts.depthPrompt.depth) {
-          const at = Math.min(1 + parts.depthPrompt.depth, messages.length);
-          messages.splice(at, 0, {
-            role: "system",
-            content: `【深度提示词】\n${parts.depthPrompt.prompt}`,
-          });
-        }
+        // 三段式组装（含深度提示词注入位置）抽到 ./chat/rp-messages.ts，那边有测试守着
+        messages.push(
+          ...assembleRpMessages({
+            stableSystem: parts.stableSystem,
+            history: conv.messages,
+            lorebook: parts.lorebook,
+            summary: parts.summary,
+            depthPrompt: parts.depthPrompt,
+          })
+        );
       } else {
         // 角色卡被删,回退普通逻辑
         if (systemPrompt) messages.push({ role: "system", content: systemPrompt });

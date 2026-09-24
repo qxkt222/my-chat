@@ -569,6 +569,44 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 
 **未做**（留给后续，属需评估项）
 
-- `useTavernStore.ts`(1649) / `TavernView.tsx`(1057) / `ChatInput.tsx`(949) / `SimulationView.tsx`(908) /
-  `useChatStore.ts`(752) 的拆分（§5.1 只完成了第 1 步 i18n）。
+- ~~`useTavernStore.ts`(1649) / `TavernView.tsx`(1057) / `ChatInput.tsx`(949) / `SimulationView.tsx`(908) /
+  `useChatStore.ts`(752) 的拆分~~ —— ✅ 已在 §7.10 完成。
 - `csp: null` 与 `assetProtocol.scope: ["**"]` 的收紧 —— 开发者判断本项目不做公网部署、威胁模型不成立，主动跳过。
+
+---
+
+### 7.10 结构改造轮（2026-09-20，测试驱动）
+
+> 承 §7.9。这一轮**不动功能**，只把五个最大的文件拆开，并给拆出来的逻辑补上测试。
+> 原则：先抽**可测的纯逻辑**，再谈其余；不硬搬闭包与状态机。
+
+**五个大文件的前后行数**
+
+| 文件 | 前 | 后 | 拆出什么 |
+|---|---|---|---|
+| `stores/useTavernStore.ts` | 1648 | **1439** | `tavern/{utils,constants,prompt,group-owner,assembly}.ts` |
+| `components/tavern/TavernView.tsx` | 1057 | **1049** | `tavern/selectors.ts` |
+| `components/simulation/SimulationView.tsx` | 908 | **491** | `NewSimulationModal.tsx` / `StatePanels.tsx` / `presets.ts` |
+| `components/chat/ChatInput.tsx` | 949 | **875** | `input-triggers.ts` / `mcp-step.ts` |
+| `stores/useChatStore.ts` | 752 | **743** | `chat/{utils,rp-messages}.ts` |
+| **合计** | 5314 | **4597** | 11 个新模块 |
+
+**前端测试 34 → 72**（`npm test`；Rust 侧仍是 17）。`gate all` 与 `assert-lint` 全程保持绿。
+
+**拆的过程里抓到的两件事**
+
+1. **6 处复制粘贴**：单聊 / 滑卡重放 / 续写 / 群聊四个发送入口，各自抄了一份「采样器回退链」
+   与「三段式消息组装」。现在共用 `tavern/assembly.ts` 一份，并有 8 条**钉住顺序**的测试 ——
+   三段式顺序直接决定 DeepSeek 缓存命中率，而缓存失效在界面上看不出来（回复照常，只是变慢变贵）。
+2. **又两处「文档说有测试、其实没有」**：「群聊归属解析 8/8 通过」与深度提示词的注入位置，
+   都是当年用临时脚本跑的、脚本没入库 —— 等于 `npm test` 从未覆盖。
+   现在 `group-owner.test.ts` 与 `rp-messages.test.ts` 把它们固定下来了。
+
+**未做（有意不拆）**
+
+- `useChatStore.sendMessage` 剩下的 300 余行、`ChatInput.handleSend` 剩下的大半：核心是
+  **流式闭包与状态机**（`set`/`get`、rAF 合帧、取消竞态、落盘时机）。硬拆会把「一处能读懂的状态机」
+  变成「跨文件追踪的隐式耦合」，收益为负。
+- `flushPendingStreams` 有意留在 `useChatStore` 内：它依赖 `useChatStore.setState`，搬出去会形成循环依赖。
+
+**口径提醒**：本节行数为 `(Get-Content).Count` 口径，与探针的 `split("\n").length` 相差 1，按 §7.9 的约定记。
