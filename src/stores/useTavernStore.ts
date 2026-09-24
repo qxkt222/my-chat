@@ -9,10 +9,7 @@ import {
   buildRpSystemParts,
   buildGroupSystemParts,
   injectAuthorNote,
-  resolveVarMacros,
-  collectLorebookTextWithTimed,
   type TimedLoreState,
-  type LoreCollectResult,
 } from "@/lib/rp-prompt";
 import { translateText } from "@/lib/translate";
 import { budgetFor, shrinkMessages } from "@/lib/context-budget";
@@ -20,55 +17,18 @@ import { askConfirm } from "@/components/ui/ConfirmDialog";
 import { showToast } from "@/components/ui/Toast";
 import { pluginAPI } from "@/plugin/PluginHost";
 
-function uuid(): string {
-  return crypto.randomUUID();
-}
-function nowISO(): string {
-  return new Date().toISOString();
-}
-
-/** 发送前统一替换会话消息变量({{var::x}}/{{getvar::x}});无变量时零开销 */
-function resolveConversationVars(
-  messages: Pick<Message, "role" | "content">[],
-  conv: TavernConversation
-): Pick<Message, "role" | "content">[] {
-  if (!conv.variables || Object.keys(conv.variables).length === 0) return messages;
-  return messages.map((m) => ({
-    role: m.role,
-    content: resolveVarMacros(m.content, conv.variables),
-  }));
-}
-
-/** 合并定时世界书状态:sticky 常驻内容并集 + cooldown 递减幸存值 ∪ 本轮新命中(新命中覆盖为完整冷却) */
-function mergeTimedLore(
-  prev: TimedLoreState | undefined,
-  result: LoreCollectResult
-): TimedLoreState {
-  return {
-    stickyContents: [...new Set([...(prev?.stickyContents || []), ...result.stickyHits])],
-    cooldownLeft: { ...result.cooldownHits },
-  };
-}
-
-/** 数据银行/聊天附件(酒馆 Data Bank):拼成 system 块注入 prompt(可变尾部,缓存友好) */
-function buildAttachmentBlock(conv: TavernConversation): string {
-  const atts = (conv.attachments || []).filter((a) => a.name.trim() && a.content.trim());
-  if (atts.length === 0) return "";
-  return (
-    `【数据银行 / 聊天附件】\n` +
-    atts.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
-  );
-}
-
-/** 内置翻译:目标语言 + 自动翻译开关(持久化到 localStorage) */
-const TARGET_KEY = "tavern_translate_target";
-const AUTO_KEY = "tavern_auto_translate";
-const SUMMARIZE_KEY = "tavern_auto_summarize";
-/** 自动摘要阈值:距上次摘要新增消息数(酒馆 Summarize 简化) */
-const SUMMARIZE_THRESHOLD = 15;
-/** 自动滑卡开关 key + 最短长度阈值(酒馆 Auto-Swipe:回复太短自动换一版) */
-const AUTOSWIPE_KEY = "tavern_auto_swipe";
-const AUTOSWIPE_MIN_LEN = 80;
+// ── 已外移的模块（原本都堆在这个文件里，见各文件头部的拆分说明）──
+import { uuid, nowISO } from "./tavern/utils";
+import {
+  TARGET_KEY,
+  AUTO_KEY,
+  SUMMARIZE_KEY,
+  SUMMARIZE_THRESHOLD,
+  AUTOSWIPE_KEY,
+  AUTOSWIPE_MIN_LEN,
+} from "./tavern/constants";
+import { resolveConversationVars, mergeTimedLore, buildAttachmentBlock } from "./tavern/prompt";
+import { parseGroupOwner } from "./tavern/group-owner";
 
 interface TavernState {
   conversations: TavernConversation[];
@@ -1584,65 +1544,4 @@ export const useTavernStore = create<TavernState>((set, get) => ({
   getActive: () => get().conversations.find((c) => c.id === get().activeId),
 }));
 
-/**
- * 群聊自动回应的归属解析:从回复内容里提取是哪个角色说的。
- * 支持格式(按优先级):
- *   1. 【角色名】 开头          —— 酒馆规范格式
- *   2. 角色名: 开头(中英冒号)   —— 常见变体
- *   3. *角色名* 或 (角色名) 前缀 —— 动作描写风格
- *   4. 开头直接是角色名(模糊匹配)
- * 返回 { owner, content }(content 已去掉标记),识别失败返回 null。
- */
-function parseGroupOwner(
-  content: string,
-  roleNames: string[]
-): { owner: string; content: string } | null {
-  const trimmed = content.trim();
-  if (!trimmed) return null;
-
-  // 1) 【角色名】 开头
-  const bracket = /^【([^】]+)】\s*/.exec(trimmed);
-  if (bracket) {
-    const owner = matchRole(bracket[1] ?? "", roleNames);
-    if (owner) return { owner, content: trimmed.slice((bracket[0] ?? "").length) };
-  }
-
-  // 2) 角色名: 开头
-  const colon = /^([^：:]{1,30})[：:]\s*/.exec(trimmed);
-  if (colon) {
-    const owner = matchRole((colon[1] ?? "").trim(), roleNames);
-    if (owner) return { owner, content: trimmed.slice((colon[0] ?? "").length) };
-  }
-
-  // 3) *角色名* / (角色名) 前缀
-  const star = /^\*([^*]{1,30})\*\s*/.exec(trimmed);
-  if (star) {
-    const owner = matchRole((star[1] ?? "").trim(), roleNames);
-    if (owner) return { owner, content: trimmed.slice((star[0] ?? "").length) };
-  }
-  const paren = /^\(([^)]{1,30})\)\s*/.exec(trimmed);
-  if (paren) {
-    const owner = matchRole((paren[1] ?? "").trim(), roleNames);
-    if (owner) return { owner, content: trimmed.slice((paren[0] ?? "").length) };
-  }
-
-  // 4) 开头直接是角色名(截取前几个字符模糊匹配)
-  const head = trimmed.slice(0, 12);
-  for (const name of roleNames) {
-    if (head.startsWith(name)) {
-      return { owner: name, content: trimmed.slice(name.length).replace(/^[：:]\s*/, "") };
-    }
-  }
-
-  return null;
-}
-
-/** 精确匹配 → 去空格 → 大小写不敏感,任一命中即返回规范名 */
-function matchRole(candidate: string, roleNames: string[]): string | null {
-  const c = candidate.trim();
-  if (!c) return null;
-  for (const name of roleNames) {
-    if (name === c || name.toLowerCase() === c.toLowerCase() || name.trim() === c) return name;
-  }
-  return null;
-}
+// parseGroupOwner / matchRole 已移到 ./tavern/group-owner.ts（配套单测 group-owner.test.ts）
