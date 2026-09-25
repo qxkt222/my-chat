@@ -1,31 +1,53 @@
 import { useState } from "react";
-import { Wrench, Plus, Trash2, Upload, Eye, X, Save, Check, ArrowLeft } from "lucide-react";
+import {
+  Wrench,
+  Plus,
+  Trash2,
+  Upload,
+  Eye,
+  X,
+  Save,
+  Check,
+  ArrowLeft,
+  ChevronUp,
+  ChevronDown,
+  AlertTriangle,
+} from "lucide-react";
 import { useCharacterStore } from "@/stores/useCharacterStore";
-import { useTavernStore } from "@/stores/useTavernStore";
+import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { readFile, pickFile } from "@/lib/tauri";
 import { parseLorebook } from "@/lib/lorebook-import";
 import { parseCharacterJson } from "@/lib/character-card";
 import { showToast } from "@/components/ui/Toast";
+import { budgetFor } from "@/lib/context-budget";
+import { countTokens } from "@/lib/token-counter";
+import {
+  charCount,
+  enabledCharTotal,
+  enabledCount,
+  emptyRosterIndex,
+  isEntryEnabled,
+  splitByGroup,
+} from "@/lib/preset-roster";
 import type { PromptPreset } from "@/types";
 
-/** 提示词预设管理:导入酒馆预设(单条或 Freaky 完整导出)+ 列表 + 查看/编辑 + 删除 + 启用
+/** 提示词预设管理 —— **全局条目名册**（2026-09-25 改造）
  *
- *  2026-09-25 开发者反馈两件事,这里都兑现了：
- *   1.「预设没有单独启用按钮，不能决定启用什么预设」—— 原先「启用」只能去角色编辑器
- *      的下拉里选(CharacterEditor)，这一页只有眼睛和垃圾桶。现在每行有「启用」，
- *      作用对象是**当前角色卡**(presetId 就存在角色卡上)，点一下即切换。
- *   2.「找不到退出键」—— 页顶给了一个一直看得见的「返回」。
- *      ⚠️ 第一版把「返回」接到了 onClose，结果它把**整个设置弹窗**关掉了，
- *      开发者原话：「我点了是退出弹窗反而不是回到当初的设置那一筐」。
- *      现在接的是 onBack —— 只切回设置内的上一层 tab，弹窗不动。
+ *  与旧版的根本差别：启用单位从「一套预设（角色卡绑一个）」变成「名册里逐条开关」。
+ *  开关与顺序都是**全局**的、与角色无关 —— 开发者原话：
+ *  「它是通用的，就像酒馆里面那个一样，它与角色的状态无关，
+ *    角色状态应该是由角色自己的提示词以及世界书决定」。
  *
- *  注：本轮只做到「一套预设生效」(角色卡绑一个)。酒馆那种「同一预设内多条目各自开关、
- *  叠加生效」是另一套数据模型(需要条目分组 + 多选拼装)，未在本轮范围内。 */
+ *  已启用的条目按 order 升序拼成实际提示词（见 lib/preset-roster.ts 的 assembleRoster）；
+ *  一条都没启用时，发送链路回退到角色卡绑定的单套预设。
+ *
+ *  还有一条历史包袱：项目里那个「返回」曾经接到 onClose，把整个设置弹窗关掉了，
+ *  开发者原话「我点了是退出弹窗反而不是回到当初的设置那一筐」。现在接的是 onBack。 */
 export function PresetManager({ onBack }: { onBack?: (() => void) | undefined }) {
   const t = useT();
   const store = useCharacterStore();
-  const tavern = useTavernStore();
+  const settings = useSettingsStore();
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const [newTemplate, setNewTemplate] = useState("");
@@ -34,22 +56,21 @@ export function PresetManager({ onBack }: { onBack?: (() => void) | undefined })
   const [editName, setEditName] = useState("");
   const [editTemplate, setEditTemplate] = useState("");
 
-  // 当前生效的预设 id —— 存在**当前酒馆会话的角色卡**上（字段名 presetId）。
-  // 空表示回落经典 Chat，与酒馆发送链路的兜底（card.presetId || "preset-classic-char"）一致。
-  const activeCard = (() => {
-    const conv = tavern.getActive();
-    return conv ? (store.characters.find((c) => c.id === conv.character_id) ?? null) : null;
-  })();
-  const activePresetId = activeCard?.presetId || "preset-classic-char";
+  // 预算：与发送链路同源（当前模型 × 使用率），超限只标红不拦。
+  // 模型取全局 activeModel —— 会话级覆盖由会话自己管，这里只是给个数量级参考。
+  const model = settings.models.find((m) => m.name === settings.activeModel);
+  const budget = budgetFor(model, settings.budgetConfig);
 
-  /** 把某套预设设为当前角色卡生效 —— 与角色编辑器里那个下拉是同一个字段 presetId */
-  const activatePreset = async (p: PromptPreset) => {
-    if (!activeCard) {
-      showToast("info", t("preset.needCard"));
-      return;
-    }
-    await store.saveCharacter({ ...activeCard, presetId: p.id });
-    showToast("success", t("preset.activated", { name: p.name }));
+  const groups = splitByGroup(store.presets, store.rosterIndex ?? emptyRosterIndex());
+  // 用 token 口径与预算比较（countTokens 与 countTokens 同源）；字数另列供直观参考
+  const enabledTokens = store.presets
+    .filter(isEntryEnabled)
+    .reduce((s, p) => s + countTokens(p.template), 0);
+  const overBudget = enabledTokens > budget;
+
+  /** 切换某条是否参与拼装（全局开关，不碰角色卡） */
+  const toggle = (p: PromptPreset) => {
+    void store.togglePresetEnabled(p.id);
   };
 
   const openPreset = (p: PromptPreset) => {
@@ -180,90 +201,175 @@ export function PresetManager({ onBack }: { onBack?: (() => void) | undefined })
         </div>
       )}
 
-      <div className="space-y-1">
-        {store.presets.map((p) => {
-          const isActive = p.id === activePresetId;
-          return (
-            <div key={p.id} className="border border-border rounded-md bg-card">
-              <div className="flex items-center gap-2 px-2 py-1.5">
-                <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openPreset(p)}>
-                  <div className="text-xs font-medium">
-                    {p.name}{" "}
-                    {p.is_preset && (
-                      <span className="text-[9px] text-muted-foreground">(内置)</span>
-                    )}
-                  </div>
-                  <p className="text-[10px] text-muted-foreground truncate">{p.description}</p>
-                </div>
-                <button
-                  onClick={() => void activatePreset(p)}
-                  className={`px-2 py-0.5 text-[10px] rounded border flex items-center gap-1 whitespace-nowrap ${
-                    isActive
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-input text-muted-foreground hover:bg-muted"
-                  }`}
-                  title={isActive ? t("preset.active") : t("preset.activate")}
-                >
-                  {isActive ? <Check className="w-3 h-3" /> : null}
-                  {isActive ? t("preset.active") : t("preset.activate")}
-                </button>
-                <button
-                  onClick={() => openPreset(p)}
-                  className="p-0.5 rounded hover:bg-muted text-muted-foreground"
-                  title={t("preset.view")}
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                </button>
-                {!p.is_preset && (
-                  <button
-                    onClick={() => store.removePreset(p.id)}
-                    className="p-0.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-              {/* 展开查看/编辑条目(自定义可改,内置只读) */}
-              {editId === p.id && (
-                <div className="px-2 pb-2 space-y-1.5 border-t border-border pt-1.5">
-                  <input
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    placeholder={t("preset.name")}
-                    readOnly={p.is_preset}
-                    className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded"
-                  />
-                  <textarea
-                    value={editTemplate}
-                    onChange={(e) => setEditTemplate(e.target.value)}
-                    rows={8}
-                    readOnly={p.is_preset}
-                    placeholder={t("preset.templatePlaceholder")}
-                    className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded resize-none font-mono"
-                  />
-                  <div className="flex justify-end gap-2">
-                    {!p.is_preset && (
-                      <button
-                        onClick={saveEdit}
-                        disabled={!editName.trim() || !editTemplate.trim()}
-                        className="px-2.5 py-1 text-[11px] rounded bg-primary/10 text-primary hover:bg-primary/20 flex items-center gap-1"
-                      >
-                        <Save className="w-3 h-3" /> {t("settings.save")}
-                      </button>
-                    )}
-                    <button
-                      onClick={() => setEditId(null)}
-                      className="px-2.5 py-1 text-[11px] rounded border border-input hover:bg-muted text-muted-foreground flex items-center gap-1"
-                    >
-                      <X className="w-3 h-3" /> {t("settings.cancel")}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+      {/* 预算条：已启用合计 vs 上下文预算。超了**只标红提醒，不拦发送**
+          （开发者 2026-09-25 选定：「显示字数 + 超了提醒，但不阻止」）。 */}
+      <div
+        className={`flex items-center gap-2 px-2 py-1.5 rounded border text-[10px] ${
+          overBudget
+            ? "border-destructive/40 bg-destructive/10 text-destructive"
+            : "border-border bg-muted/30 text-muted-foreground"
+        }`}
+      >
+        <span>
+          {t("preset.enabledSummary", {
+            n: String(enabledCount(store.presets)),
+            chars: String(enabledCharTotal(store.presets)),
+            tokens: String(enabledTokens),
+            budget: String(budget),
+          })}
+        </span>
+        {overBudget && (
+          <span className="flex items-center gap-1 font-medium">
+            <AlertTriangle className="w-3 h-3" /> {t("preset.overBudget")}
+          </span>
+        )}
       </div>
+
+      {groups.map((g) => {
+        const groupEnabled = g.entries.filter(isEntryEnabled).length;
+        return (
+          <div key={g.key} className="border border-border rounded-md overflow-hidden">
+            {/* 包头：包名 + 该包启用数 + 整包开/关 */}
+            <div className="flex items-center gap-2 px-2 py-1.5 bg-muted/40">
+              <span className="text-[11px] font-semibold truncate">{g.label}</span>
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                {t("preset.groupCount", {
+                  on: String(groupEnabled),
+                  all: String(g.entries.length),
+                })}
+              </span>
+              <div className="flex-1" />
+              <button
+                onClick={() => {
+                  // 整包开/关：只在需要翻转的条目上动手，避免无谓落盘
+                  for (const e of g.entries) {
+                    if (isEntryEnabled(e) !== (groupEnabled !== g.entries.length)) continue;
+                    toggle(e);
+                  }
+                }}
+                className="px-2 py-0.5 text-[10px] rounded border border-input hover:bg-muted whitespace-nowrap"
+              >
+                {groupEnabled === g.entries.length ? t("preset.groupOff") : t("preset.groupOn")}
+              </button>
+            </div>
+
+            <div className="divide-y divide-border">
+              {g.entries.map((p, idx) => {
+                const on = isEntryEnabled(p);
+                return (
+                  <div key={p.id}>
+                    <div className="flex items-center gap-2 px-2 py-1.5">
+                      {/* 上下移：包内调顺序，决定拼装先后 */}
+                      <div className="flex flex-col">
+                        <button
+                          onClick={() => void store.movePresetInGroup(p.id, -1)}
+                          disabled={idx === 0}
+                          className="p-0.5 rounded hover:bg-muted text-muted-foreground disabled:opacity-20"
+                          title={t("preset.moveUp")}
+                        >
+                          <ChevronUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => void store.movePresetInGroup(p.id, 1)}
+                          disabled={idx === g.entries.length - 1}
+                          className="p-0.5 rounded hover:bg-muted text-muted-foreground disabled:opacity-20"
+                          title={t("preset.moveDown")}
+                        >
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openPreset(p)}>
+                        <div className="text-xs font-medium">
+                          {p.name}{" "}
+                          {p.is_preset && (
+                            <span className="text-[9px] text-muted-foreground">
+                              {t("preset.builtinTag")}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-muted-foreground truncate">
+                          {p.description}
+                          {" · "}
+                          <span className="whitespace-nowrap">
+                            {t("preset.charCount", { n: String(charCount(p)) })}
+                          </span>
+                        </p>
+                      </div>
+
+                      {/* 全局开关（可开可关）——不再绑角色卡 */}
+                      <button
+                        onClick={() => toggle(p)}
+                        className={`px-2 py-0.5 text-[10px] rounded border flex items-center gap-1 whitespace-nowrap ${
+                          on
+                            ? "border-primary/40 bg-primary/10 text-primary"
+                            : "border-input text-muted-foreground hover:bg-muted"
+                        }`}
+                        title={on ? t("preset.active") : t("preset.activate")}
+                      >
+                        {on ? <Check className="w-3 h-3" /> : null}
+                        {on ? t("preset.active") : t("preset.activate")}
+                      </button>
+                      <button
+                        onClick={() => openPreset(p)}
+                        className="p-0.5 rounded hover:bg-muted text-muted-foreground"
+                        title={t("preset.view")}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                      {!p.is_preset && (
+                        <button
+                          onClick={() => store.removePreset(p.id)}
+                          className="p-0.5 rounded hover:bg-destructive/20 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    {/* 展开查看/编辑条目(自定义可改,内置只读) */}
+                    {editId === p.id && (
+                      <div className="px-2 pb-2 space-y-1.5 border-t border-border pt-1.5">
+                        <input
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          placeholder={t("preset.name")}
+                          readOnly={p.is_preset}
+                          className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded"
+                        />
+                        <textarea
+                          value={editTemplate}
+                          onChange={(e) => setEditTemplate(e.target.value)}
+                          rows={8}
+                          readOnly={p.is_preset}
+                          placeholder={t("preset.templatePlaceholder")}
+                          className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded resize-none font-mono"
+                        />
+                        <div className="flex justify-end gap-2">
+                          {!p.is_preset && (
+                            <button
+                              onClick={saveEdit}
+                              disabled={!editName.trim() || !editTemplate.trim()}
+                              className="px-2.5 py-1 text-[11px] rounded bg-primary/10 text-primary hover:bg-primary/20 flex items-center gap-1"
+                            >
+                              <Save className="w-3 h-3" /> {t("settings.save")}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setEditId(null)}
+                            className="px-2.5 py-1 text-[11px] rounded border border-input hover:bg-muted text-muted-foreground flex items-center gap-1"
+                          >
+                            <X className="w-3 h-3" /> {t("preset.collapse")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

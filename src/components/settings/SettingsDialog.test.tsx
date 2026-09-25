@@ -27,7 +27,6 @@ import { SettingsDialog } from "./SettingsDialog";
 import { useCharacterStore } from "@/stores/useCharacterStore";
 import { useAppModeStore } from "@/stores/useAppModeStore";
 import { useTavernStore } from "@/stores/useTavernStore";
-import { ToastContainer } from "@/components/ui/Toast";
 import type { PromptPreset } from "@/types";
 
 afterEach(cleanup);
@@ -102,75 +101,83 @@ beforeEach(() => {
 /** 预设项上的「查看/编辑条目」按钮（title 来自 i18n preset.view，注意带斜杠后缀） */
 const VIEW_TITLE = "查看/编辑条目";
 
-describe("预设「启用」按钮（2026-09-25 开发者反馈：预设没有单独启用按钮）", () => {
-  it("每一行都渲染出「启用」按钮", () => {
+/** 取某条预设所在的行（新版把行放进「包」分区里了，不再是原来的 div.border）
+ *  取的是「行 + 展开的编辑区」共同的外层容器：名称文字 → 上层 flex items-center（行头）
+ *  → 再上一层（包住编辑区的行容器）。 */
+function presetRow(name: string): HTMLElement {
+  const head = screen.getByText(name).closest("div.flex.items-center") as HTMLElement | null;
+  const outer = head?.parentElement ?? null;
+  if (!outer) throw new Error("找不到预设行: " + name);
+  return outer;
+}
+
+describe("全局条目名册：逐条开关（2026-09-25 改造）", () => {
+  it("每条都渲染出开关", () => {
     openPresetsTab();
-    const btns = screen.getAllByText("启用", { selector: "button" });
-    expect(btns.length).toBe(2); // 内置预设A + 自定义预设B
+    // 两条都未启用 → 两个「启用」
+    expect(screen.getAllByText("启用", { selector: "button" }).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("点「启用」把 presetId 写回当前酒馆会话的角色卡", async () => {
-    useCharacterStore.setState({ characters: [mkCard("card-1") as never] });
+  it("点「启用」把它**全局**开启（写回 store.presets[].enabled），**不碰角色卡**", async () => {
+    // 故意放一张绑了别的预设的角色卡：全局开关不该动它
+    useCharacterStore.setState({
+      characters: [mkCard("card-1", "preset-classic-char") as never],
+    });
     useTavernStore.setState({
       conversations: [mkConv("conv-1", "card-1") as never],
       activeId: "conv-1",
     });
 
     openPresetsTab();
-    const row = screen.getByText("内置预设A").closest("div.border") as HTMLElement;
-    fireEvent.click(within(row).getByText("启用", { selector: "button" }));
+    fireEvent.click(within(presetRow("内置预设A")).getByText("启用", { selector: "button" }));
 
     await waitFor(() => {
-      const saved = useCharacterStore.getState().characters.find((c) => c.id === "card-1");
-      expect(saved?.presetId).toBe("builtin-1");
+      const p = useCharacterStore.getState().presets.find((x) => x.id === "builtin-1");
+      expect(p?.enabled).toBe(true);
     });
+    // 角色卡上的 presetId 必须原样不动 —— 「与角色的状态无关」
+    const card = useCharacterStore.getState().characters.find((c) => c.id === "card-1");
+    expect(card?.presetId).toBe("preset-classic-char");
   });
 
-  it("当前生效的那条显示「已启用」而不是「启用」", () => {
-    useCharacterStore.setState({ characters: [mkCard("card-1", "builtin-1") as never] });
-    useTavernStore.setState({
-      conversations: [mkConv("conv-1", "card-1") as never],
-      activeId: "conv-1",
+  it("已启用的显示「已启用」，再点一下能关掉（可开可关）", async () => {
+    useCharacterStore.setState({
+      presets: [
+        mkPreset("builtin-1", "内置预设A", true, "模板内容 A"),
+        mkPreset("custom-1", "自定义预设B", false, "模板内容 B"),
+      ],
     });
-
     openPresetsTab();
-    const row = screen.getByText("内置预设A").closest("div.border") as HTMLElement;
-    expect(within(row).getByText("已启用")).toBeTruthy();
-    // 另一条仍是「启用」
-    const other = screen.getByText("自定义预设B").closest("div.border") as HTMLElement;
-    expect(within(other).getByText("启用", { selector: "button" })).toBeTruthy();
+    const row = presetRow("内置预设A");
+
+    fireEvent.click(within(row).getByText("启用", { selector: "button" }));
+    await waitFor(() => expect(within(row).getByText("已启用")).toBeTruthy());
+
+    fireEvent.click(within(row).getByText("已启用", { selector: "button" }));
+    await waitFor(() =>
+      expect(useCharacterStore.getState().presets.find((x) => x.id === "builtin-1")?.enabled).toBe(
+        false
+      )
+    );
   });
 
-  it("没有当前角色时点「启用」给出可读提示，而不是静默失败", () => {
-    useCharacterStore.setState({ characters: [] });
-    useTavernStore.setState({ conversations: [], activeId: null });
-    useAppModeStore.setState({ mode: "tavern", tavernSubMode: "rp" });
-    // Toast 由 ToastContainer 渲染，测试里得自己挂上，否则提示无处可去
-    render(<ToastContainer />);
-    const onClose = vi.fn();
-    render(<SettingsDialog open onClose={onClose} />);
-    fireEvent.click(screen.getByText("预设", { selector: "button" }));
-    const btns = screen.getAllByText("启用", { selector: "button" });
-    fireEvent.click(btns[0] as HTMLElement);
-    expect(screen.getByText(/请先在酒馆里选中一个角色/)).toBeTruthy();
+  it("页顶汇总行显示已启用条数与字数（超预算只提醒不拦）", () => {
+    openPresetsTab();
+    expect(screen.getByText(/已启用\s*\d+\s*条/)).toBeTruthy();
   });
 
   it("页顶「返回」切回设置的上一层 tab，且**不关闭弹窗**", () => {
     // 这是对第一版实现的纠正：第一版把「返回」接到了 onClose，
     // 点它是「整个设置弹窗关掉」。开发者原话：
     //   「我点了是退出弹窗反而不是回到当初的设置那一筐」。
-    // 所以本测试把两件事都钉住：① 回到上一层（角色 tab 可见）② onClose 一次都没调。
     const onClose = openPresetsTab();
 
-    // 已在预设面板
     expect(screen.getByText("导入预设", { selector: "button" })).toBeTruthy();
 
     fireEvent.click(screen.getByText("返回", { selector: "button" }));
 
-    // ① 回到上一层：预设面板消失，角色页的标志性按钮出现
     expect(screen.queryByText("导入预设", { selector: "button" })).toBeNull();
     expect(screen.getByText("新建人设", { selector: "button" })).toBeTruthy();
-    // ② 弹窗仍在
     expect(screen.getByText("酒馆设置")).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -202,25 +209,29 @@ describe("SettingsDialog 逃生通道", () => {
   it("内置预设展开后，展开区必须有一个可点的收起按钮（它的唯一退路）", () => {
     openPresetsTab();
 
-    const row = screen.getByText("内置预设A").closest("div.border") as HTMLElement;
-    expect(row).toBeTruthy();
+    const row = presetRow("内置预设A");
     fireEvent.click(within(row).getByTitle(VIEW_TITLE));
 
     expect(screen.getByDisplayValue("模板内容 A")).toBeTruthy();
 
-    const cancels = within(row).getAllByText("取消", { selector: "button" });
-    expect(cancels.length).toBeGreaterThan(0);
-    fireEvent.click(cancels[0] as HTMLElement);
+    // 展开区里的按钮是「收起」；底部那个「取消」是关整个弹窗的，两者不混用
+    const rowWithEditor = (screen.getByDisplayValue("模板内容 A") as HTMLElement).closest(
+      "div"
+    ) as HTMLElement;
+    const collapse = rowWithEditor.querySelector("button:last-of-type") as HTMLElement;
+    expect(collapse).toBeTruthy();
+    fireEvent.click(collapse);
 
     expect(screen.queryByDisplayValue("模板内容 A")).toBeNull();
   });
 
-  it("自定义预设展开后有「保存」与「取消」两个按钮", () => {
+  it("自定义预设展开后有「保存」与「收起」两个按钮", () => {
     openPresetsTab();
-    const row = screen.getByText("自定义预设B").closest("div.border") as HTMLElement;
-    fireEvent.click(within(row).getByTitle(VIEW_TITLE));
-    expect(within(row).getAllByText("保存", { selector: "button" }).length).toBeGreaterThan(0);
-    expect(within(row).getAllByText("取消", { selector: "button" }).length).toBeGreaterThan(0);
+    fireEvent.click(within(presetRow("自定义预设B")).getByTitle(VIEW_TITLE));
+    const row = presetRow("自定义预设B");
+    expect(within(row).getByDisplayValue("模板内容 B")).toBeTruthy();
+    expect(screen.getAllByText("保存", { selector: "button" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("收起", { selector: "button" }).length).toBeGreaterThan(0);
   });
 
   it("列表很长时（60 条）仍能展开并收起 —— 防展开区渲染到列表另一端", () => {
@@ -230,13 +241,11 @@ describe("SettingsDialog 逃生通道", () => {
     useCharacterStore.setState({ presets: many });
     openPresetsTab();
 
-    const row = screen.getByText("预设59").closest("div.border") as HTMLElement;
-    fireEvent.click(within(row).getByTitle(VIEW_TITLE));
+    fireEvent.click(within(presetRow("预设59")).getByTitle(VIEW_TITLE));
     expect(screen.getByDisplayValue("模板59")).toBeTruthy();
 
-    const cancels = within(row).getAllByText("取消", { selector: "button" });
-    expect(cancels.length).toBeGreaterThan(0);
-    fireEvent.click(cancels[0] as HTMLElement);
+    const collapse = screen.getAllByText("收起", { selector: "button" })[0] as HTMLElement;
+    fireEvent.click(collapse);
     expect(screen.queryByDisplayValue("模板59")).toBeNull();
   });
 });

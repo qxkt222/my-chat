@@ -23,7 +23,7 @@ export function ContextViewer({
 }: {
   card: CharacterCard;
   persona?: Persona | null | undefined;
-  preset?: PromptPreset | null | undefined;
+  preset?: PromptPreset[] | null | undefined;
   lorebooks: CharacterBook[];
   recentMessages: Pick<Message, "role" | "content">[];
   currentInput: string;

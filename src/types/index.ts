@@ -228,7 +228,12 @@ export interface Persona {
   created_at: string;
 }
 
-/** 角色扮演提示词预设(主提示词模板) */
+/** 角色扮演提示词预设(主提示词模板)
+ *
+ *  2026-09-25 起从「一套预设生效」扩展为「全局条目名册」：每一行既是可独立编辑的预设，
+ *  也可以作为名册里的一条**条目**参与拼装（对齐酒馆 Prompts 列表的逐条开关）。
+ *  三条新字段都是可选的 —— 旧数据没有它们时按「未启用、无分组、排最后」处理，
+ *  所以读旧文件不会炸、行为也不变。 */
 export interface PromptPreset {
   id: string;
   name: string;
@@ -237,6 +242,26 @@ export interface PromptPreset {
   template: string;
   is_preset: boolean;
   created_at: string;
+  /** 是否参与名册拼装（酒馆的逐条开关）。缺省/undefined = **未启用**。
+   *  ⚠️ 旧数据没有这个键，所以只能判 `=== true`，不能用真值判断。 */
+  enabled?: boolean | undefined;
+  /** 归属的导入批次（预设包名）。缺省 = 内置或无分组，UI 归到最后一区。 */
+  group?: string | undefined;
+  /** 包内拼装顺序（升序）。缺省 = 排在该包末尾。 */
+  order?: number | undefined;
+}
+
+/** 名册的全局索引（落盘在 presets/roster-index.json）
+ *
+ *  为什么要有它：逐条开关（enabled）存在各条目自己的 JSON 里就够了，
+ *  但**包的顺序**与**包内顺序**是全局属性，没有归属文件可写 —— 需要一个锚。
+ *  这也是「全局、与角色无关」这条设计的落地点：换角色、换会话都读同一份。 */
+export interface PresetRosterIndex {
+  /** 包的展示顺序；未列出的包排在后面（按包名排序兜底） */
+  groupOrder: string[];
+  /** 包名 → 该包内条目 id 的顺序 */
+  entryOrder: Record<string, string[]>;
+  updated_at: string;
 }
 
 /** 酒馆模式 RP 会话(独立存储于 %APPDATA%\com.my-chat\tavern\*.json,

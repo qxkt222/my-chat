@@ -1011,7 +1011,7 @@ export function TavernView({ onOpenSettings }: Props) {
                 charStore.getActivePersona() ||
                 null
               }
-              preset={charStore.getPreset(activeCard.presetId || "preset-classic-char") || null}
+              preset={charStore.presets}
               lorebooks={
                 [
                   charStore.globalLorebook,

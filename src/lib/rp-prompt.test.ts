@@ -8,7 +8,20 @@ import {
   injectAuthorNote,
   resolveVarMacros,
 } from "./rp-prompt";
-import type { CharacterCard } from "@/types";
+import type { CharacterCard, PromptPreset } from "@/types";
+
+/** 造一条名册条目；不传 enabled 时不写这个键，模拟旧数据 */
+function entry(id: string, template: string, extra: Partial<PromptPreset> = {}): PromptPreset {
+  return {
+    id,
+    name: id,
+    description: "",
+    template,
+    is_preset: false,
+    created_at: "2026-01-01T00:00:00.000Z",
+    ...extra,
+  };
+}
 
 const card = {
   id: "c1",
@@ -34,6 +47,62 @@ const card = {
   created_at: "",
   updated_at: "",
 } as CharacterCard;
+
+describe("预设名册数组形态（2026-09-25 全局条目名册）", () => {
+  const base = {
+    card,
+    persona: null,
+    lorebooks: [],
+    recentMessages: [],
+    currentInput: "",
+  };
+
+  it("取所有已启用条目按 order 拼进 stableSystem", () => {
+    const roster: PromptPreset[] = [
+      entry("b", "第二段", { enabled: true, order: 2 }),
+      entry("a", "第一段", { enabled: true, order: 1 }),
+      entry("off", "不该出现", { enabled: false, order: 0 }),
+    ];
+    const parts = buildRpSystemParts({ ...base, preset: roster });
+    expect(parts.stableSystem).toContain("第一段");
+    expect(parts.stableSystem).toContain("第二段");
+    expect(parts.stableSystem).not.toContain("不该出现");
+    // 顺序：第一段在第二段之前（拼装顺序决定 DeepSeek 缓存前缀）
+    expect(parts.stableSystem.indexOf("第一段")).toBeLessThan(parts.stableSystem.indexOf("第二段"));
+  });
+
+  it("一条都没启用 → 回退到内置默认模板（不是空 system）", () => {
+    const roster: PromptPreset[] = [
+      entry("a", "六万字", { enabled: false }),
+      entry("b", "也不开", {}), // 旧数据：连 enabled 键都没有
+    ];
+    const parts = buildRpSystemParts({ ...base, preset: roster });
+    expect(parts.stableSystem).not.toContain("六万字");
+    expect(parts.stableSystem).not.toContain("也不开");
+    // 回退模板里有角色名
+    expect(parts.stableSystem).toContain("芙兰");
+  });
+
+  it("空数组与 null 等价：都走回退", () => {
+    const a = buildRpSystemParts({ ...base, preset: [] });
+    const b = buildRpSystemParts({ ...base, preset: null });
+    expect(a.stableSystem).toBe(b.stableSystem);
+  });
+
+  it("角色卡自己的 system_prompt 优先于名册（设计边界：角色只管自己的提示词）", () => {
+    const withCardPrompt = { ...card, system_prompt: "卡自己的提示词" } as CharacterCard;
+    const roster: PromptPreset[] = [entry("a", "名册内容", { enabled: true, order: 1 })];
+    const parts = buildRpSystemParts({ ...base, card: withCardPrompt, preset: roster });
+    expect(parts.stableSystem).toContain("卡自己的提示词");
+    expect(parts.stableSystem).not.toContain("名册内容");
+  });
+
+  it("单套预设（非数组）仍按旧语义生效 —— 老调用点不受改造影响", () => {
+    const single = entry("solo", "单套内容");
+    const parts = buildRpSystemParts({ ...base, preset: single });
+    expect(parts.stableSystem).toContain("单套内容");
+  });
+});
 
 describe("buildRpSystemParts", () => {
   it("深度提示词带出且宏替换", () => {

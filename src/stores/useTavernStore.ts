@@ -484,7 +484,6 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       null;
 
     // RP system_prompt:角色卡 + Persona + 预设 + 世界书(复用 rp-prompt 组装)
-    const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
     // 世界书合并(酒馆四类来源):主(恒) + 全局启用的独立书 + 角色内嵌 + Persona 多选 + 会话绑定
     const books = collectLorebooks({
       globalLorebook: charStore.globalLorebook,
@@ -498,7 +497,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const parts = buildRpSystemParts({
       card,
       persona,
-      preset,
+      preset: charStore.presets,
       lorebooks: books,
       recentMessages: conv.messages,
       currentInput: content,
@@ -746,7 +745,6 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       charStore.personas.find((p) => p.id === conv.persona_id) ||
       charStore.getActivePersona() ||
       null;
-    const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
     const books = collectLorebooks({
       globalLorebook: charStore.globalLorebook,
       card,
@@ -758,7 +756,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const parts = buildRpSystemParts({
       card,
       persona,
-      preset,
+      preset: charStore.presets,
       lorebooks: books,
       recentMessages: before,
       currentInput: lastUser.content,
@@ -994,7 +992,6 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       charStore.personas.find((p) => p.id === conv.persona_id) ||
       charStore.getActivePersona() ||
       null;
-    const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
     const books = collectLorebooks({
       globalLorebook: charStore.globalLorebook,
       card,
@@ -1006,7 +1003,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const parts = buildRpSystemParts({
       card,
       persona,
-      preset,
+      preset: charStore.presets,
       lorebooks: books,
       recentMessages: conv.messages.slice(0, idx),
       currentInput: "",
@@ -1214,11 +1211,10 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     } else {
       const activeCard = cards.find((c) => c.id === conv.activeCharId) || cards[0];
       if (!activeCard) return;
-      const preset = charStore.getPreset(activeCard.presetId || "preset-classic-char") || null;
       const parts = buildRpSystemParts({
         card: activeCard,
         persona,
-        preset,
+        preset: charStore.presets,
         lorebooks: collectLorebooks({
           globalLorebook: charStore.globalLorebook,
           card: {
