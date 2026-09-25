@@ -263,12 +263,12 @@ const GATES = {
       check(
         localSha.length === 40 && localSha === remoteSha,
         "本地 HEAD 与远端 main 完全一致(即已真正推送)",
-        `local=${localSha.slice(0, 8)} remote=${remoteSha.slice(0, 8)}`,
+        `local=${localSha.slice(0, 8)} remote=${remoteSha.slice(0, 8)}`
       );
       check(
         tracked.length >= BASELINE.trackedFiles,
         `索引文件数 ≥ 基线 ${BASELINE.trackedFiles}`,
-        `实测 ${tracked.length}`,
+        `实测 ${tracked.length}`
       );
       check(targetN === 0, "src-tauri/target 零文件入索引", `实测 ${targetN}`);
       check(nmN === 0, "node_modules 零文件入索引", `实测 ${nmN}`);
@@ -282,24 +282,24 @@ const GATES = {
     run: () => {
       const report = path.join(TMP, "vitest-report.json");
       console.log("\n跑 vitest 并产出 JSON 报告…");
-      const r = spawnSync(
-        NODE,
-        [BIN.vitest, "run", "--reporter=json", `--outputFile=${report}`],
-        { cwd: ROOT, stdio: "inherit", env: process.env },
-      );
+      const r = spawnSync(NODE, [BIN.vitest, "run", "--reporter=json", `--outputFile=${report}`], {
+        cwd: ROOT,
+        stdio: "inherit",
+        env: process.env,
+      });
       if (!existsSync(report)) {
         console.error(`✗ 未能产出测试报告(${r.error?.message ?? "报告文件不存在"})`);
         return 1;
       }
       const j = JSON.parse(readFileSync(report, "utf8"));
       console.log(
-        `  total=${j.numTotalTests} passed=${j.numPassedTests} failed=${j.numFailedTests} files=${j.testResults?.length ?? "?"}`,
+        `  total=${j.numTotalTests} passed=${j.numPassedTests} failed=${j.numFailedTests} files=${j.testResults?.length ?? "?"}`
       );
       check(j.numFailedTests === 0, "失败用例数 == 0", `实测 ${j.numFailedTests}`);
       check(
         j.numPassedTests >= BASELINE.minTests,
         `通过用例数 ≥ 基线 ${BASELINE.minTests}`,
-        `实测 ${j.numPassedTests}`,
+        `实测 ${j.numPassedTests}`
       );
       check(j.success === true, "vitest success == true", `实测 ${j.success}`);
       return finish("assert-tests");
@@ -318,7 +318,7 @@ const GATES = {
       let errors = NaN;
       let warnings = NaN;
       const sum = r.text.match(
-        /(\d+)\s+problems?\s*\(\s*(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\s*\)/i,
+        /(\d+)\s+problems?\s*\(\s*(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\s*\)/i
       );
       if (sum) {
         errors = Number(sum[2]);
@@ -334,7 +334,7 @@ const GATES = {
       check(
         Number.isFinite(warnings) && warnings <= BASELINE.maxLintWarnings,
         `告警数 ≤ 基线 ${BASELINE.maxLintWarnings}`,
-        `实测 ${warnings}`,
+        `实测 ${warnings}`
       );
       return finish("assert-lint");
     },
@@ -352,7 +352,7 @@ const GATES = {
       check(
         bad <= BASELINE.maxPrettierUnformatted,
         `不合格文件数 ≤ ${BASELINE.maxPrettierUnformatted}`,
-        `实测 ${bad}`,
+        `实测 ${bad}`
       );
       return finish("assert-format");
     },
@@ -365,44 +365,54 @@ const GATES = {
       // 口径：--check 只列「Diff in <文件>:<行>」首部，每个文件一段。
       // 按文件去重计数，避免同一文件的多个 diff 段被当成多个文件。
       const files = new Set(
-        [...r.text.matchAll(/^Diff in (.+?):\d+/gm)].map((m) => m[1].replace(/^\\\\\?\\/, "")),
+        [...r.text.matchAll(/^Diff in (.+?):\d+/gm)].map((m) => m[1].replace(/^\\\\\?\\/, ""))
       );
       console.log(`  rustfmt 有 diff 的文件 = ${files.size}`);
       check(r.status === 0, "cargo fmt --check 退出码 == 0", `实测 ${r.status}`);
       check(
         files.size <= BASELINE.maxRustfmtDiffFiles,
         `有 diff 的文件数 ≤ ${BASELINE.maxRustfmtDiffFiles}`,
-        `实测 ${files.size}`,
+        `实测 ${files.size}`
       );
       return finish("assert-rustfmt");
     },
   },
 
   "assert-coverage": {
-    desc: "覆盖率断言:真跑 --coverage 且四项读数不低于地板",
+    desc: "覆盖率断言:真跑 --coverage，解析控制台 All files 行并与地板比较",
     run: () => {
-      const code = GATES.coverage.run();
-      if (code !== 0) {
-        console.error(`✗ 覆盖率闸门本身失败(exit ${code}),无法断言读数`);
-        return code;
+      // ⚠️ 必须读**控制台**那行，不能读 coverage-summary.json。
+      //    2026-09-25 实测：同一次跑，JSON 的 total 报 60.46%（它只含有覆盖的 25 个文件），
+      //    控制台 "All files" 报 22.6%（含全部源文件为分母）——两个数不是同一个量；
+      //    而且当时读到的 JSON 还是前一晚 23:49 的旧文件（当天根本没更新）。
+      //    地板与 vite.config.ts 的 thresholds 都按控制台口径，才能与闸门退出码同源。
+      const r = capture(NODE, [BIN.vitest, "run", "--coverage"]);
+      if (r.status !== 0) {
+        console.error(`✗ 覆盖率闸门本身失败(exit ${r.status}),无法断言读数`);
+        return r.status;
       }
-      const p = path.join(ROOT, "coverage", "coverage-summary.json");
-      if (!existsSync(p)) {
-        check(false, "coverage/coverage-summary.json 存在");
+      const line = r.text.split("\n").find((l) => l.trim().startsWith("All files"));
+      if (!line) {
+        check(false, "控制台存在 'All files' 汇总行");
         return finish("assert-coverage");
       }
-      const total = JSON.parse(readFileSync(p, "utf8")).total ?? {};
-      // 地板与 vite.config.ts 的 thresholds 同源,但这里独立复核一遍:
-      // 只看退出码的话,阈值被谁删掉都不会有人发现。
-      //
-      // ⚠️ 口径差(已实测,不是 bug):同一份覆盖率有两个读数 ——
-      //    · 控制台 "All files" 行:  branches 52.24 (v8 provider 自己的算法)
-      //    · coverage-summary.json:  branches 52    (istanbul 经典 covered/total=440/846=52.0046,被 floor)
-      //    这里**故意**读结构化 JSON:字段名稳定、可编程读,不依赖表格排版;
-      //    代价是比控制台低不到 1 个点。地板取值时已把这点余量算进去。
-      const floors = { lines: 58, statements: 56, functions: 47, branches: 50 };
+      // 列序：% Stmts | % Branch | % Funcs | % Lines
+      const cells = line
+        .split("|")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const got = {
+        statements: Number(cells[1]),
+        branches: Number(cells[2]),
+        functions: Number(cells[3]),
+        lines: Number(cells[4]),
+      };
+      console.log(
+        `  All files: stmts=${got.statements} branch=${got.branches} funcs=${got.functions} lines=${got.lines}`
+      );
+      const floors = { lines: 20, statements: 19, functions: 11, branches: 14 };
       for (const [k, floor] of Object.entries(floors)) {
-        const v = total[k]?.pct ?? NaN;
+        const v = got[k];
         console.log(`  ${k} = ${v}% (地板 ${floor}%)`);
         check(Number.isFinite(v) && v >= floor, `${k} ≥ ${floor}%`, `实测 ${v}%`);
       }
@@ -439,7 +449,7 @@ const GATES = {
         check(
           total > 100 * 1024,
           "js 总量 > 100 kB(排除空构建)",
-          `实测 ${(total / 1024).toFixed(1)} kB`,
+          `实测 ${(total / 1024).toFixed(1)} kB`
         );
       } else {
         check(false, "dist/assets 目录存在");
@@ -457,7 +467,7 @@ if (!which || !GATES[which]) {
   console.log(`\n项目根: ${ROOT}`);
   console.log(`cargo:  ${CARGO}`);
   console.log(
-    `基线:   文件 ${BASELINE.trackedFiles} · 用例 ${BASELINE.minTests} · 告警 ≤${BASELINE.maxLintWarnings}`,
+    `基线:   文件 ${BASELINE.trackedFiles} · 用例 ${BASELINE.minTests} · 告警 ≤${BASELINE.maxLintWarnings}`
   );
   process.exit(which ? 2 : 0);
 }

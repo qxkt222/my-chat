@@ -187,6 +187,17 @@ export const tavernMessages: Record<string, Record<string, string>> = {
   },
   "preset.saved": { zh: "预设已保存", en: "Preset saved" },
   "preset.view": { zh: "查看/编辑条目", en: "View / edit" },
+  // 2026-09-25 开发者反馈：预设列表页既没有「启用」入口，也找不到「返回」。
+  // 启用按钮把「当前角色卡用哪套预设」从角色编辑器的下拉里搬到这一页，
+  // 不用再跑去别的地方找；返回按钮给一个一直看得见的退出口。
+  "preset.activate": { zh: "启用", en: "Use" },
+  "preset.active": { zh: "已启用", en: "In use" },
+  "preset.back": { zh: "返回", en: "Back" },
+  "preset.activated": { zh: "已启用预设：{name}", en: "Preset in use: {name}" },
+  "preset.needCard": {
+    zh: "请先在酒馆里选中一个角色 —— 预设是绑在角色卡上的",
+    en: "Select a character first — presets are bound to a character card",
+  },
   "tavern.title": { zh: "酒馆", en: "Tavern" },
   "tavern.manage": { zh: "管理角色/世界书/人设", en: "Manage characters / lorebook / personas" },
   "tavern.searchChar": { zh: "搜索角色…", en: "Search characters…" },
