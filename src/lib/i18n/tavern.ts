@@ -185,14 +185,18 @@ export const tavernMessages: Record<string, Record<string, string>> = {
   },
   "regex.import": { zh: "导入正则", en: "Import regex" },
   "regex.imported": { zh: "已导入 {n} 条正则规则", en: "Imported {n} regex rules" },
+  "regex.importedMixed": {
+    zh: "已导入 {n} 条正则规则（其中 {k} 条会在发送给模型前生效，不改变界面显示）",
+    en: "Imported {n} rules ({k} apply before sending, without changing the UI)",
+  },
   "regex.importedPartial": {
     zh: "已导入 {n} 条正则规则；另有 {k} 条「只改提示词」的脚本本应用做不到，已跳过",
     en: "Imported {n} rules; {k} prompt-only scripts skipped (not supported here)",
   },
   "regex.importFail": { zh: "不是可识别的正则套件", en: "Not a recognizable regex suite" },
   "regex.hint2": {
-    zh: "酒馆正则套件（JSON 数组，含 findRegex）可直接导入；标记 promptOnly 的脚本只作用于提示词，本应用不支持",
-    en: "Tavern regex suites (JSON array with findRegex) can be imported; promptOnly scripts are not supported here",
+    zh: "酒馆正则套件（JSON 数组，含 findRegex）可直接导入；placement=2 的脚本只改「发给模型的消息」，不在界面上显示",
+    en: "Tavern regex suites (JSON array with findRegex) import directly; placement=2 rules only affect what is sent to the model, never the UI",
   },
   "preset.new": { zh: "新建", en: "New" },
   "preset.name": { zh: "预设名称", en: "Preset name" },
