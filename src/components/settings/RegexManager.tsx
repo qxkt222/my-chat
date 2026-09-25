@@ -6,13 +6,14 @@ import { applyRegexRules } from "@/lib/regex-format";
 import { looksLikeRegexSuite, parseTavernRegexSuite } from "@/lib/regex-import";
 import { readFile, pickFile } from "@/lib/tauri";
 import { showToast } from "@/components/ui/Toast";
+import { PanelHeader } from "./PanelHeader";
 
 /** AI 回复样式后处理(酒馆 Regex):内置规则 + 自定义,渲染前生效
  *
  *  2026-09-25 加导入：酒馆的「正则脚本套件」（JSON 数组，每项 findRegex）此前
  *  在应用里没有入口 —— 开发者把它当预设导入，被误报成「这是角色卡」。
  *  现在「样式」tab 可以直接导入，规则保留原有的 gi 标志与启用状态。 */
-export function RegexManager() {
+export function RegexManager({ onBack }: { onBack?: (() => void) | undefined }) {
   const t = useT();
   const s = useSettingsStore();
   const [editing, setEditing] = useState<{
@@ -72,24 +73,29 @@ export function RegexManager() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-1.5">
-        <Wand2 className="w-4 h-4 text-primary" />
-        <span className="text-sm font-semibold">{t("regex.title")}</span>
-        <span className="text-[10px] text-muted-foreground">{t("regex.subtitle")}</span>
-        <div className="flex-1" />
-        <button
-          onClick={importFromFile}
-          className="px-2 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1"
-        >
-          <Upload className="w-3 h-3" /> {t("regex.import")}
-        </button>
-        <button
-          onClick={startNew}
-          className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
-        >
-          <Plus className="w-3 h-3" /> {t("regex.new")}
-        </button>
-      </div>
+      {/* 吸顶头：导入几十条正则后，下面的规则列表不会把返回/新建/导入挤走 */}
+      <PanelHeader
+        icon={<Wand2 className="w-4 h-4 text-primary" />}
+        title={t("regex.title")}
+        subtitle={t("regex.subtitle")}
+        onBack={onBack}
+        right={
+          <>
+            <button
+              onClick={importFromFile}
+              className="px-2 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1 whitespace-nowrap"
+            >
+              <Upload className="w-3 h-3" /> {t("regex.import")}
+            </button>
+            <button
+              onClick={startNew}
+              className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1 whitespace-nowrap"
+            >
+              <Plus className="w-3 h-3" /> {t("regex.new")}
+            </button>
+          </>
+        }
+      />
       <p className="text-[10px] text-muted-foreground">{t("regex.hint")}</p>
       <p className="text-[10px] text-muted-foreground">{t("regex.hint2")}</p>
 

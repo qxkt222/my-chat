@@ -5,14 +5,18 @@ import { useT } from "@/lib/i18n";
 import { readFile, pickFile } from "@/lib/tauri";
 import { parseCharacterJson } from "@/lib/character-card";
 import { showToast } from "@/components/ui/Toast";
+import { PanelHeader } from "@/components/settings/PanelHeader";
 import type { LoreEntry, Persona } from "@/types";
 
 interface EditEntry extends LoreEntry {
   key: string;
 }
 
-/** 世界书管理:多本 + 导入酒馆世界书 + Persona 绑定 + 单本条目编辑 */
-export function LorebookManager() {
+/** 世界书管理:多本 + 导入酒馆世界书 + Persona 绑定 + 单本条目编辑
+ *
+ *  2026-09-25 加 onBack 与吸顶头：开发者反馈「导入的多了会把上面那些排序按钮挤掉」，
+ *  要求在不改弹窗大小的前提下有一条一直看得见的返回。 */
+export function LorebookManager({ onBack }: { onBack?: (() => void) | undefined }) {
   const t = useT();
   const store = useCharacterStore();
   const [activeId, setActiveId] = useState<string>("__main__");
@@ -149,18 +153,21 @@ export function LorebookManager() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-1.5">
-        <BookOpen className="w-4 h-4 text-primary" />
-        <span className="text-sm font-semibold">{t("lore.title")}</span>
-        <span className="text-[10px] text-muted-foreground">{t("lore.subtitle")}</span>
-        <div className="flex-1" />
-        <button
-          onClick={importBook}
-          className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
-        >
-          <Upload className="w-3 h-3" /> {t("lore.import")}
-        </button>
-      </div>
+      {/* 吸顶头：世界书条目一多，下面的下拉/新建/导入也不会把返回挤走 */}
+      <PanelHeader
+        icon={<BookOpen className="w-4 h-4 text-primary" />}
+        title={t("lore.title")}
+        subtitle={t("lore.subtitle")}
+        onBack={onBack}
+        right={
+          <button
+            onClick={importBook}
+            className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1 whitespace-nowrap"
+          >
+            <Upload className="w-3 h-3" /> {t("lore.import")}
+          </button>
+        }
+      />
       <p className="text-[10px] text-muted-foreground">{t("lore.importHint")}</p>
 
       {/* 世界书列表 + 新建 + 删除;每本(除主)可勾选启用,多本同时生效 */}
