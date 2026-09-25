@@ -19,6 +19,7 @@ import { useT } from "@/lib/i18n";
 import { readFile, pickFile } from "@/lib/tauri";
 import { parseLorebook } from "@/lib/lorebook-import";
 import { parseCharacterJson } from "@/lib/character-card";
+import { looksLikeRegexSuite, parseTavernRegexSuite } from "@/lib/regex-import";
 import { showToast } from "@/components/ui/Toast";
 import { budgetFor } from "@/lib/context-budget";
 import { countTokens } from "@/lib/token-counter";
@@ -108,6 +109,28 @@ export function PresetManager({ onBack }: { onBack?: (() => void) | undefined })
       if (lore) {
         await store.importLorebook(raw);
         showToast("info", t("preset.isLorebook"));
+        return;
+      }
+      // 酒馆「正则脚本套件」：JSON **数组**，每项带 findRegex。
+      // 2026-09-25 实测事故：开发者导入这种文件时被回「这是角色卡」——
+      // 因为它落到了下面的角色卡分支，而旧解析器对数组取字段会凑出一张空白卡。
+      // 现在先认它，并直接导入（正则归「样式」tab 管）。
+      if (looksLikeRegexSuite(raw)) {
+        const res = parseTavernRegexSuite(raw);
+        if (res.rules.length > 0) {
+          for (const rule of res.rules) await settings.saveRegexRule(rule);
+          showToast(
+            "success",
+            res.promptOnlySkipped > 0
+              ? t("regex.importedPartial", {
+                  n: String(res.rules.length),
+                  k: String(res.promptOnlySkipped),
+                })
+              : t("regex.imported", { n: String(res.rules.length) })
+          );
+          return;
+        }
+        showToast("info", t("preset.isRegex"));
         return;
       }
       const card = parseCharacterJson(raw);

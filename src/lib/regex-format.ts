@@ -9,6 +9,10 @@ export interface RegexRule {
   pattern: string;
   replacement: string;
   enabled: boolean;
+  /** 正则标志。缺省 = 只用 "g"（渲染期「全部替换」是既定语义）。
+   *  2026-09-25 加：酒馆正则套件里 22/25 条带 `i`（大小写不敏感），
+   *  丢掉它会让规则「看起来导入了、实际匹配不上」——比报错更糟。 */
+  flags?: string | undefined;
 }
 
 /** 内置规则(默认启用):去 OOC 注释 + 去全大写括号指令 */
@@ -42,7 +46,8 @@ export function applyRegexRules(content: string, rules: RegexRule[]): string {
   for (const r of rules) {
     if (!r.enabled || !r.pattern) continue;
     try {
-      out = out.replace(new RegExp(r.pattern, "g"), r.replacement);
+      // 标志：规则自带优先（酒馆导入的带 i），否则沿用历史上的 "g"
+      out = out.replace(new RegExp(r.pattern, r.flags || "g"), r.replacement);
     } catch {
       /* 坏正则跳过 */
     }

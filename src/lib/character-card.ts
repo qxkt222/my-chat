@@ -118,10 +118,17 @@ export function parseCharacterJson(
   json: string
 ): Omit<CharacterCard, "id" | "created_at" | "updated_at"> | null {
   try {
-    const obj = JSON.parse(json) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(json);
+    // ⚠️ 必须先是普通对象。数组/字符串/数字一律不是角色卡。
+    //    2026-09-25 实测事故：酒馆「正则脚本套件」是一个 JSON **数组**，
+    //    旧代码直接对数组取 data.name/data.description（全部 undefined → String 成空串），
+    //    cardFromData 于是「成功地」造出一张**空白角色卡**，
+    //    导入时就被报成「这是角色卡」，把用户引到完全错误的 tab。
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
     if (obj.spec === MAGIC_V2 || obj.spec === MAGIC_V3) {
       const data = obj.data as Record<string, unknown>;
-      if (!data || typeof data !== "object") return null;
+      if (!data || typeof data !== "object" || Array.isArray(data)) return null;
       const card = cardFromData(data);
       card.specVersion = obj.spec === MAGIC_V3 ? "3" : "2";
       return card;

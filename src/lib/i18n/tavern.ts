@@ -179,6 +179,21 @@ export const tavernMessages: Record<string, Record<string, string>> = {
     zh: "这是角色卡，请到「角色」tab 导入",
     en: "That's a character card — import it in the Characters tab",
   },
+  "preset.isRegex": {
+    zh: "这是酒馆正则套件，请到「样式」tab 导入",
+    en: "That's a tavern regex suite — import it in the Style tab",
+  },
+  "regex.import": { zh: "导入正则", en: "Import regex" },
+  "regex.imported": { zh: "已导入 {n} 条正则规则", en: "Imported {n} regex rules" },
+  "regex.importedPartial": {
+    zh: "已导入 {n} 条正则规则；另有 {k} 条「只改提示词」的脚本本应用做不到，已跳过",
+    en: "Imported {n} rules; {k} prompt-only scripts skipped (not supported here)",
+  },
+  "regex.importFail": { zh: "不是可识别的正则套件", en: "Not a recognizable regex suite" },
+  "regex.hint2": {
+    zh: "酒馆正则套件（JSON 数组，含 findRegex）可直接导入；标记 promptOnly 的脚本只作用于提示词，本应用不支持",
+    en: "Tavern regex suites (JSON array with findRegex) can be imported; promptOnly scripts are not supported here",
+  },
   "preset.new": { zh: "新建", en: "New" },
   "preset.name": { zh: "预设名称", en: "Preset name" },
   "preset.templatePlaceholder": {
