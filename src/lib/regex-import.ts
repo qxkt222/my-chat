@@ -25,15 +25,48 @@ interface TavernRegexScript {
   disabled?: boolean;
   markdownOnly?: boolean;
   promptOnly?: boolean;
+  placement?: number[];
+  minDepth?: number | null;
+  maxDepth?: number | null;
 }
 
 export interface RegexImportResult {
   /** 可直接喂给 settings.regexRules 的规则 */
   rules: RegexRule[];
-  /** 只作用于提示词、本应用无法生效的条数（如实告知用） */
-  promptOnlySkipped: number;
+  /** placement 含 1（作用于显示）的条数 */
+  displayCount: number;
+  /** placement 含 2（作用于发给模型的消息 = 只改提示词）的条数 */
+  promptCount: number;
   /** 标记为 disabled 的条数（导入时保持禁用） */
   disabledCount: number;
+}
+
+/** 酒馆 placement 归一化：非法值一律当「显示」（历史行为） */
+function normalizePlacement(p: unknown): number[] {
+  if (!Array.isArray(p)) return [1];
+  const nums = p.filter((x): x is number => typeof x === "number" && (x === 1 || x === 2));
+  return nums.length > 0 ? [...new Set(nums)].sort((a, b) => a - b) : [1];
+}
+
+/** 单条脚本 → RegexRule（供导入与单测共用，避免两处各写一份映射） */
+export function buildRegexRule(s: TavernRegexScript): RegexRule | null {
+  const find = typeof s.findRegex === "string" ? s.findRegex.trim() : "";
+  if (!find) return null;
+  const { pattern, flags } = parseTavernRegex(find);
+  if (!pattern) return null;
+  return {
+    id: `tavern-${typeof s.id === "string" && s.id ? s.id : crypto.randomUUID()}`,
+    name: (typeof s.scriptName === "string" && s.scriptName.trim()) || "酒馆正则",
+    pattern,
+    replacement: typeof s.replaceString === "string" ? s.replaceString : "",
+    // 保持酒馆里的启用状态（disabled=true → 导入后也是关的）
+    enabled: s.disabled !== true,
+    flags,
+    // placement：1=显示，2=发给模型。实测那套预设 23 条 [2]、2 条 [2,1]
+    placement: normalizePlacement(s.placement),
+    minDepth: typeof s.minDepth === "number" ? s.minDepth : null,
+    maxDepth: typeof s.maxDepth === "number" ? s.maxDepth : null,
+  };
 }
 
 /**
@@ -93,7 +126,12 @@ export function parseTavernRegex(re: string): { pattern: string; flags: string }
  * 坏项跳过而不是整包失败（与 lorebook/preset 导入的容错口径一致）。
  */
 export function parseTavernRegexSuite(rawJson: string): RegexImportResult {
-  const out: RegexImportResult = { rules: [], promptOnlySkipped: 0, disabledCount: 0 };
+  const out: RegexImportResult = {
+    rules: [],
+    displayCount: 0,
+    promptCount: 0,
+    disabledCount: 0,
+  };
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawJson);
@@ -105,29 +143,15 @@ export function parseTavernRegexSuite(rawJson: string): RegexImportResult {
   for (const item of parsed) {
     if (item === null || typeof item !== "object") continue;
     const s = item as TavernRegexScript;
-    const find = typeof s.findRegex === "string" ? s.findRegex.trim() : "";
-    if (!find) continue;
-
-    // 只改提示词的脚本本应用生效不了：数出来告诉用户，不混进规则列表
-    if (s.promptOnly === true) {
-      out.promptOnlySkipped += 1;
-      continue;
-    }
-
-    const { pattern, flags } = parseTavernRegex(find);
-    if (!pattern) continue;
-
-    const name = (typeof s.scriptName === "string" && s.scriptName.trim()) || "酒馆正则";
-    out.rules.push({
-      id: `tavern-${typeof s.id === "string" && s.id ? s.id : crypto.randomUUID()}`,
-      name,
-      pattern,
-      replacement: typeof s.replaceString === "string" ? s.replaceString : "",
-      // 保持酒馆里的启用状态（disabled=true → 导入后也是关的）
-      enabled: s.disabled !== true,
-      flags,
-    });
-    if (s.disabled === true) out.disabledCount += 1;
+    const rule = buildRegexRule(s);
+    if (!rule) continue;
+    // ⚠️ 这里**不再跳过** promptOnly。2026-09-25 起应用新增了「出站清理」通路
+    //    （lib/outgoing-regex.ts），placement 含 2 的规则会在发给模型前生效，
+    //    所以那 5 条「只改提示词」的脚本现在是真支持，而不是如实跳过。
+    out.rules.push(rule);
+    if (rule.placement?.includes(1)) out.displayCount += 1;
+    if (rule.placement?.includes(2)) out.promptCount += 1;
+    if (rule.enabled === false) out.disabledCount += 1;
   }
   return out;
 }

@@ -115,12 +115,46 @@ describe("套件导入与能力边界", () => {
     expect(rule?.id.startsWith("tavern-")).toBe(true);
   });
 
-  it("promptOnly 的脚本**不进规则**、单独计数（本应用做不到，不许假装）", () => {
+  it("promptOnly（placement=[2]）的脚本**照样导入**，并计入 promptCount", () => {
+    // 2026-09-25 改：应用新增「出站清理」通路后，这 5 条不再是「做不到」，
+    // 而是真支持 —— 所以旧版「跳过并计数」的断言在这里被反过来了。
     const r = parseTavernRegexSuite(
-      JSON.stringify([script(), script({ promptOnly: true }), script({ promptOnly: true })])
+      JSON.stringify([
+        script({ placement: [1] }),
+        script({ promptOnly: true, placement: [2] }),
+        script({ promptOnly: true, placement: [2] }),
+      ])
     );
-    expect(r.rules).toHaveLength(1);
-    expect(r.promptOnlySkipped).toBe(2);
+    expect(r.rules).toHaveLength(3);
+    expect(r.displayCount).toBe(1);
+    expect(r.promptCount).toBe(2);
+  });
+
+  it("placement 被保留：[2,1] 的规则两边都算", () => {
+    const r = parseTavernRegexSuite(
+      JSON.stringify([script({ placement: [2, 1] }), script({ placement: undefined })])
+    );
+    expect(r.rules[0]?.placement).toEqual([1, 2]);
+    // 缺省 placement → 归一到「显示」，保持历史行为
+    expect(r.rules[1]?.placement).toEqual([1]);
+    expect(r.displayCount).toBe(2);
+    expect(r.promptCount).toBe(1);
+  });
+
+  it("minDepth/maxDepth 被保留（Context Saver 是 minDepth=2）", () => {
+    const r = parseTavernRegexSuite(
+      JSON.stringify([script({ placement: [2], minDepth: 2, maxDepth: null })])
+    );
+    expect(r.rules[0]?.minDepth).toBe(2);
+    expect(r.rules[0]?.maxDepth).toBeNull();
+  });
+
+  it("placement 是非法值时归一到「显示」，不抛", () => {
+    const r = parseTavernRegexSuite(
+      JSON.stringify([script({ placement: ["x", 9] }), script({ placement: [] })])
+    );
+    expect(r.rules[0]?.placement).toEqual([1]);
+    expect(r.rules[1]?.placement).toEqual([1]);
   });
 
   it("disabled=true 的脚本导入后是关的，且计入 disabledCount", () => {

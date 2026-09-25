@@ -121,10 +121,10 @@ export function PresetManager({ onBack }: { onBack?: (() => void) | undefined })
           for (const rule of res.rules) await settings.saveRegexRule(rule);
           showToast(
             "success",
-            res.promptOnlySkipped > 0
-              ? t("regex.importedPartial", {
+            res.promptCount > 0
+              ? t("regex.importedMixed", {
                   n: String(res.rules.length),
-                  k: String(res.promptOnlySkipped),
+                  k: String(res.promptCount),
                 })
               : t("regex.imported", { n: String(res.rules.length) })
           );

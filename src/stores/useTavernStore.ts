@@ -13,6 +13,7 @@ import {
 } from "@/lib/rp-prompt";
 import { translateText } from "@/lib/translate";
 import { budgetFor, shrinkMessages } from "@/lib/context-budget";
+import { applyOutgoingRegex } from "@/lib/outgoing-regex";
 import { askConfirm } from "@/components/ui/ConfirmDialog";
 import { showToast } from "@/components/ui/Toast";
 import { pluginAPI } from "@/plugin/PluginHost";
@@ -594,11 +595,15 @@ export const useTavernStore = create<TavernState>((set, get) => ({
 
     try {
       // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const finalMessages = shrinkMessages(
+      const shrunk = shrinkMessages(
         resolveConversationVars(apiMessages, conv),
         budgetFor(model, settingsStore.budgetConfig),
         { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
       ).messages;
+      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
+      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
+      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
       await streamChat(
         {
           model_config: {
@@ -839,11 +844,15 @@ export const useTavernStore = create<TavernState>((set, get) => ({
 
     try {
       // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const finalMessages = shrinkMessages(
+      const shrunk = shrinkMessages(
         resolveConversationVars(apiMessages, conv),
         budgetFor(model, settingsStore.budgetConfig),
         { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
       ).messages;
+      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
+      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
+      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
       await streamChat(
         {
           model_config: {
@@ -1351,11 +1360,15 @@ export const useTavernStore = create<TavernState>((set, get) => ({
 
     try {
       // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const finalMessages = shrinkMessages(
+      const shrunk = shrinkMessages(
         resolveConversationVars(apiMessages, conv),
         budgetFor(model, settingsStore.budgetConfig),
         { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
       ).messages;
+      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
+      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
+      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
       await streamChat(
         {
           model_config: {
