@@ -173,7 +173,11 @@ export function SettingsDialog({ open, onClose }: Props) {
             </button>
           ))}
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
+        {/* ⚠️ min-h-0 不能删：flex 子项的 min-height 默认是 auto（=不许缩到内容高度以下），
+            少了它，超长内容（如展开一个几千字的预设模板）会把弹窗顶高、把底部「取消/保存」
+            整条推出视口 —— 实测 1264x569 下取消按钮 top=796、visibleH=0，用户按不到任何退出键。
+            加上 min-h-0 后滚动条才真正接管，底部按钮恒定可见。 */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
           {tab === "models" && (
             <>
               {models.length > 0 && (
@@ -519,7 +523,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           {tab === "characters" && <CharacterManager />}
           {tab === "lore" && <LorebookManager />}
           {tab === "translate" && <TranslateManager />}
-          {tab === "presets" && <PresetManager />}
+          {tab === "presets" && <PresetManager onClose={onClose} />}
           {tab === "sampler" && <SamplerManager />}
           {tab === "budget" && <BudgetPanel />}
           {tab === "regex" && <RegexManager />}
