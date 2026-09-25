@@ -235,9 +235,12 @@ export function Header({ settingsOpen, onOpenSettings, onCloseSettings }: Props)
         >
           <ThemeIcon className="w-4 h-4" />
         </button>
+        {/* 开关语义：开着再点就关。
+            2026-09-25 开发者反馈「重新点击设置结果又来到了原来那个窗口」——
+            原先这里只有 onOpenSettings，点它永远是「开」，弹窗开着时点它毫无反应。 */}
         <button
-          onClick={onOpenSettings}
-          className={navBtn}
+          onClick={settingsOpen ? onCloseSettings : onOpenSettings}
+          className={`${navBtn} ${settingsOpen ? "bg-muted" : ""}`}
           title={
             mode === "tavern"
               ? subMode === "simulate"
