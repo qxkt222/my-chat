@@ -525,12 +525,12 @@ export function SettingsDialog({ open, onClose }: Props) {
           {tab === "skills" && <SkillManager />}
           {tab === "memory" && <MemoryManager />}
           {tab === "characters" && <CharacterManager />}
-          {tab === "lore" && <LorebookManager />}
+          {tab === "lore" && <LorebookManager onBack={() => setTab(homeTab)} />}
           {tab === "translate" && <TranslateManager />}
           {tab === "presets" && <PresetManager onBack={() => setTab(homeTab)} />}
           {tab === "sampler" && <SamplerManager />}
           {tab === "budget" && <BudgetPanel />}
-          {tab === "regex" && <RegexManager />}
+          {tab === "regex" && <RegexManager onBack={() => setTab(homeTab)} />}
           {tab === "cache" && <CacheManager />}
           {tab === "assistant" && <TavernAssistant />}
           {tab === "simulate" && <SimulationSettings />}

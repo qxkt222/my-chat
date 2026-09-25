@@ -8,7 +8,6 @@ import {
   X,
   Save,
   Check,
-  ArrowLeft,
   ChevronUp,
   ChevronDown,
   AlertTriangle,
@@ -16,6 +15,7 @@ import {
 import { useCharacterStore } from "@/stores/useCharacterStore";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
+import { PanelHeader } from "./PanelHeader";
 import { readFile, pickFile } from "@/lib/tauri";
 import { parseLorebook } from "@/lib/lorebook-import";
 import { parseCharacterJson } from "@/lib/character-card";
@@ -162,33 +162,29 @@ export function PresetManager({ onBack }: { onBack?: (() => void) | undefined })
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-1.5">
-        <Wrench className="w-4 h-4 text-primary" />
-        <span className="text-sm font-semibold">{t("preset.title")}</span>
-        <span className="text-[10px] text-muted-foreground">{t("preset.subtitle")}</span>
-        <div className="flex-1" />
-        {onBack && (
-          <button
-            onClick={onBack}
-            className="px-2.5 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
-            title={t("preset.back")}
-          >
-            <ArrowLeft className="w-3 h-3" /> {t("preset.back")}
-          </button>
-        )}
-        <button
-          onClick={() => setShowNew(!showNew)}
-          className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
-        >
-          <Plus className="w-3 h-3" /> {t("preset.new")}
-        </button>
-        <button
-          onClick={importFromFile}
-          className="px-2 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1"
-        >
-          <Upload className="w-3 h-3" /> {t("preset.import")}
-        </button>
-      </div>
+      {/* 吸顶头：长列表滚动时「返回/新建/导入」不会被挤走（面板尺寸不变） */}
+      <PanelHeader
+        icon={<Wrench className="w-4 h-4 text-primary" />}
+        title={t("preset.title")}
+        subtitle={t("preset.subtitle")}
+        onBack={onBack}
+        right={
+          <>
+            <button
+              onClick={() => setShowNew(!showNew)}
+              className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1 whitespace-nowrap"
+            >
+              <Plus className="w-3 h-3" /> {t("preset.new")}
+            </button>
+            <button
+              onClick={importFromFile}
+              className="px-2 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1 whitespace-nowrap"
+            >
+              <Upload className="w-3 h-3" /> {t("preset.import")}
+            </button>
+          </>
+        }
+      />
       <p className="text-[10px] text-muted-foreground">{t("preset.importHint")}</p>
 
       {showNew && (

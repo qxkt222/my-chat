@@ -183,6 +183,40 @@ describe("全局条目名册：逐条开关（2026-09-25 改造）", () => {
   });
 });
 
+describe("三个面板都有常驻返回（2026-09-25 开发者反馈）", () => {
+  // 原话：「就单单样式这个功能我用后就发现由于导入了很多东西导致上面那些排序
+  // 被一起挤走了，就想在不改动（弹窗大小）情况下加入返回功能，就像预设那样处理」。
+  // 这里钉住「返回按钮存在 + 点了切回上一层 + 不关弹窗」。
+  // 「一直看得见」属于排版问题，由真浏览器探针（src/probe/sticky-probe）负责 ——
+  // jsdom 元素高度恒为 0、position:sticky 不生效，不在这里假装能测。
+
+  /** 当前选中的 tab（选中态带 border-primary；返回后应变成「角色」） */
+  function activeTab(): string {
+    const btns = Array.from(document.querySelectorAll("button"));
+    const hit = btns.find((b) => b.className.includes("border-primary"));
+    return (hit?.textContent ?? "").trim();
+  }
+
+  const cases = ["预设", "世界书", "样式"] as const;
+
+  for (const label of cases) {
+    it(`「${label}」面板：返回按钮存在、切回上一层、弹窗不关`, () => {
+      useAppModeStore.setState({ mode: "tavern", tavernSubMode: "rp" });
+      const onClose = vi.fn();
+      render(<SettingsDialog open onClose={onClose} />);
+      fireEvent.click(screen.getByText(label, { selector: "button" }));
+      expect(activeTab()).toBe(label); // 已进入该面板
+
+      fireEvent.click(screen.getByText("返回", { selector: "button" }));
+
+      // 回到上一层（初始 tab = 角色），而不是关掉弹窗
+      expect(activeTab()).toBe("角色");
+      expect(screen.getByText("酒馆设置")).toBeTruthy();
+      expect(onClose).not.toHaveBeenCalled();
+    });
+  }
+});
+
 describe("SettingsDialog 逃生通道", () => {
   it("底部「取消」存在且能关掉弹窗", () => {
     const onClose = openPresetsTab();
