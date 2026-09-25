@@ -29,7 +29,22 @@ function mkPreset(i: number, big: boolean): PromptPreset {
 }
 
 const presets: PromptPreset[] = Array.from({ length: N }, (_, i) => mkPreset(i, i === N - 1));
-useCharacterStore.setState({ presets });
+// 造两组导入包 + 两条未分组，用来验证「按包分区」真的分区了（含包内 order 排序：
+// 故意把 order 写成 2,0,1，看 UI 是否按 order 而不是按数组顺序渲染）
+const groupped: PromptPreset[] = [
+  ...["包A", "包B"].flatMap((g) =>
+    [2, 0, 1].map((ord, k) => ({
+      ...mkPreset(k, false),
+      id: `g-${g}-${k}`,
+      name: `${g}条目${k}`,
+      description: `order=${ord}`,
+      group: g,
+      order: ord,
+    }))
+  ),
+  ...presets.slice(0, 2), // 这两条没有 group → 应落到「未分组」
+];
+useCharacterStore.setState({ presets: groupped });
 useAppModeStore.setState({ mode: "tavern", tavernSubMode: "rp" });
 
 const root = document.getElementById("probe-root");
