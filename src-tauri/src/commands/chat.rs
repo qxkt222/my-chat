@@ -216,6 +216,12 @@ async fn stream_chat_inner(app: &AppHandle, request: &ChatRequest) -> Result<(),
     let url = build_api_url(&model_config.api_url);
     let temp = temperature.unwrap_or(0.7);
 
+    // 空消息守卫：必须在任何网络请求之前。
+    // 2026-09-25 实测事故 —— messages 为空时请求照样发了出去，DeepSeek 回
+    // `400 Empty input messages`，界面上只有一句英文 API 报错，用户完全不知道
+    // 是自己这轮没有内容可发。原样读取自 chat_errors.log 的真实记录。
+    ensure_messages_non_empty(messages)?;
+
     // Multi-key rotation: comma-separated API keys are used round-robin (Cherry Studio style)
     let keys: Vec<&str> = model_config
         .api_key
@@ -663,6 +669,25 @@ fn extract_reasoning(line: &str) -> String {
     String::new()
 }
 
+/// 空消息守卫：拒绝「没有任何可发送内容」的请求。
+///
+/// 为什么要有它（2026-09-25 实测事故）：messages 为空时旧实现照发不误，
+/// 换来 `DeepSeek` 的 `400 Empty input messages`，界面上只显示这句英文，
+/// 用户看不出是自己这轮没内容可发。守在这里可以把失败拦在本地，
+/// 并且给出一句能读懂的话，而不是替服务端转发它的报错。
+///
+/// 两种都算空，都要拒：
+///   1. 数组本身为空；
+///   2. 数组里每一条内容都是空白（只有空格/换行）——服务端同样拒。
+fn ensure_messages_non_empty(messages: &[Message]) -> Result<(), String> {
+    let has_content = messages.iter().any(|m| !m.content.trim().is_empty());
+    if has_content {
+        Ok(())
+    } else {
+        Err("没有可发送的内容：当前消息列表为空（或全部为空白）。请先输入内容再发送。".to_string())
+    }
+}
+
 /// 截断过长文本（上游 4xx/5xx 常返回整页 HTML，动辄几百 KB），
 /// 避免把整页塞进 UI 与 `chat_errors.log`。
 /// 按字符边界截，不会切出半个 UTF-8 字符。
@@ -711,6 +736,54 @@ pub(crate) fn log_chat_error(msg: &str) {
         {
             let _ = f.write_all(line.as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_messages_guard_tests {
+    use super::{ensure_messages_non_empty, Message};
+
+    fn msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: String::new(),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_list() {
+        let r = ensure_messages_non_empty(&[]);
+        assert!(r.is_err(), "空数组必须被拒 —— 否则会发到服务端换回 400");
+        assert!(
+            r.unwrap_err().contains("没有可发送的内容"),
+            "错误文案要能读懂,不能是英文 API 原文"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_content() {
+        let msgs = vec![msg("user", "   "), msg("system", "\n\t ")];
+        assert!(
+            ensure_messages_non_empty(&msgs).is_err(),
+            "全部为空白内容同样等于没内容,服务端也会拒 —— 必须本地拦住"
+        );
+    }
+
+    #[test]
+    fn allows_single_non_empty_message() {
+        let msgs = vec![msg("user", "你好")];
+        assert!(ensure_messages_non_empty(&msgs).is_ok(), "正常消息必须放行");
+    }
+
+    #[test]
+    fn allows_when_any_one_message_has_content() {
+        // 空白与有内容混排:只要有一条有内容就该放行(前缀里有空 system 是允许的)
+        let msgs = vec![msg("system", ""), msg("user", "hi")];
+        assert!(
+            ensure_messages_non_empty(&msgs).is_ok(),
+            "只要有一条有内容就应放行,不能把合法的空 system 前缀也拦掉"
+        );
     }
 }
 

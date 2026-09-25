@@ -728,7 +728,37 @@ lines 60.46% · statements 58.55% · functions 49.6% · branches 52%
 而 `coverage-summary.json` 报 `52`（istanbul 经典口径 `covered/total = 440/846 = 52.0046` 被 floor）。
 断言**故意**读结构化 JSON（字段稳定、可编程读，不依赖表格排版），代价是比控制台低不到 1 个点。
 
-#### 7.11.6 本轮闸门终态与口径
+#### 7.11.6 空消息守卫（来自一次真实用户报错）
+
+开发者报错原文：
+
+```
+API error 400: {"error":{"message":"Empty input messages (request_id: 7cde97e6-ee74-4f4d-8e7d-8fc3305d12af)"}}
+```
+
+先定位它从哪来：**不是编辑器/运行时，是本 app**。`chat_errors.log` 里有同一个 `request_id` 的逐字记录，
+时间也与 `startup.marker` 吻合。全量读该日志后确认：**这条只出现一次**，是偶发，不是反复刷屏。
+
+根因：`stream_chat_inner` 把前端给的 `messages` 原样透传，**没有任何空数组校验**，
+于是空数组一路发到服务端，换回一句英文 400 —— 界面上完全看不出「是自己这轮没内容可发」。
+
+修法：新增纯函数 `ensure_messages_non_empty`，放在 `stream_chat_inner` 内、
+**任何网络请求之前**（实测位于该函数 L223，请求在 L355 附近），并给出一句能读懂的中文提示。
+判据做成机械可验的，两种空形态都要拒：
+
+| 形态 | 期望 | 单测 |
+|---|---|---|
+| `messages = []` | 拒 | `rejects_empty_list` |
+| 每条内容都是空白（`"   "` / `"\n\t "`） | 拒 | `rejects_whitespace_only_content` |
+| 正常单条 | 放行 | `allows_single_non_empty_message` |
+| 空白与有内容混排（空 system 前缀合法） | 放行 | `allows_when_any_one_message_has_content` |
+
+Rust 用例 **17 → 21**。补守卫时 clippy 立刻抓出一处 `clippy::doc_markdown`
+（文档注释里 `DeepSeek` 未加反引号）—— 这正是 pedantic + `-D warnings` 该起的作用：**新代码进来就被审**。
+有意未动 `stream_via_template` 分支：那是用户自定义请求体的通路，不是本事故的成因。
+
+#### 7.11.7 本轮闸门终态与口径
+
 
 `gate all` 序列现为 **7 道**：`typecheck → lint → format → rustfmt → test → coverage → build`，
 外加 `assert-*` 行为型断言（git / tests / lint / format / rustfmt / coverage / build）。
