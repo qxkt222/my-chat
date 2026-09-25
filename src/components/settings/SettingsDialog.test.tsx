@@ -155,10 +155,24 @@ describe("预设「启用」按钮（2026-09-25 开发者反馈：预设没有�
     expect(screen.getByText(/请先在酒馆里选中一个角色/)).toBeTruthy();
   });
 
-  it("页顶「返回」按钮能关掉弹窗（一个一直看得见的退出口）", () => {
+  it("页顶「返回」切回设置的上一层 tab，且**不关闭弹窗**", () => {
+    // 这是对第一版实现的纠正：第一版把「返回」接到了 onClose，
+    // 点它是「整个设置弹窗关掉」。开发者原话：
+    //   「我点了是退出弹窗反而不是回到当初的设置那一筐」。
+    // 所以本测试把两件事都钉住：① 回到上一层（角色 tab 可见）② onClose 一次都没调。
     const onClose = openPresetsTab();
+
+    // 已在预设面板
+    expect(screen.getByText("导入预设", { selector: "button" })).toBeTruthy();
+
     fireEvent.click(screen.getByText("返回", { selector: "button" }));
-    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // ① 回到上一层：预设面板消失，角色页的标志性按钮出现
+    expect(screen.queryByText("导入预设", { selector: "button" })).toBeNull();
+    expect(screen.getByText("新建人设", { selector: "button" })).toBeTruthy();
+    // ② 弹窗仍在
+    expect(screen.getByText("酒馆设置")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

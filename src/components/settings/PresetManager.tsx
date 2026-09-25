@@ -14,12 +14,15 @@ import type { PromptPreset } from "@/types";
  *  2026-09-25 开发者反馈两件事,这里都兑现了：
  *   1.「预设没有单独启用按钮，不能决定启用什么预设」—— 原先「启用」只能去角色编辑器
  *      的下拉里选(CharacterEditor)，这一页只有眼睛和垃圾桶。现在每行有「启用」，
- *      作用对象是**当前角色卡**(prompt_preset_id 就存在角色卡上)，点一下即切换。
+ *      作用对象是**当前角色卡**(presetId 就存在角色卡上)，点一下即切换。
  *   2.「找不到退出键」—— 页顶给了一个一直看得见的「返回」。
+ *      ⚠️ 第一版把「返回」接到了 onClose，结果它把**整个设置弹窗**关掉了，
+ *      开发者原话：「我点了是退出弹窗反而不是回到当初的设置那一筐」。
+ *      现在接的是 onBack —— 只切回设置内的上一层 tab，弹窗不动。
  *
  *  注：本轮只做到「一套预设生效」(角色卡绑一个)。酒馆那种「同一预设内多条目各自开关、
  *  叠加生效」是另一套数据模型(需要条目分组 + 多选拼装)，未在本轮范围内。 */
-export function PresetManager({ onClose }: { onClose?: (() => void) | undefined }) {
+export function PresetManager({ onBack }: { onBack?: (() => void) | undefined }) {
   const t = useT();
   const store = useCharacterStore();
   const tavern = useTavernStore();
@@ -120,9 +123,9 @@ export function PresetManager({ onClose }: { onClose?: (() => void) | undefined 
         <span className="text-sm font-semibold">{t("preset.title")}</span>
         <span className="text-[10px] text-muted-foreground">{t("preset.subtitle")}</span>
         <div className="flex-1" />
-        {onClose && (
+        {onBack && (
           <button
-            onClick={onClose}
+            onClick={onBack}
             className="px-2.5 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
             title={t("preset.back")}
           >

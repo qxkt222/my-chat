@@ -69,9 +69,13 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [fontSize, setFontSize] = useState(cfg.fontSize);
   const [locale, setLocale] = useState(cfg.locale);
   const [profileName, setProfileName] = useState("");
-  const [tab, setTab] = useState<TabKey>(
-    mode === "tavern" ? (subMode === "simulate" ? "simulate" : "characters") : "models"
-  );
+  /** 进入设置时落在哪个 tab —— 也是「返回」要回到的那一格。
+   *  2026-09-25 开发者反馈：「点了是退出弹窗，反而不是回到当初的设置那一筐」。
+   *  根因是这里原先**没有「上一层」的概念**，面板只能拿 onClose 当返回键，
+   *  于是「返回」= 整个弹窗关掉。现在「返回」= 回到这一格，弹窗不动。 */
+  const homeTab: TabKey =
+    mode === "tavern" ? (subMode === "simulate" ? "simulate" : "characters") : "models";
+  const [tab, setTab] = useState<TabKey>(homeTab);
   const [showWizard, setShowWizard] = useState(false);
   // 工作模式自动记忆(记忆卡)开关 + 临时会话:实时同步 store
   const workAutoSummarize = useChatStore((s) => s.workAutoSummarize);
@@ -523,7 +527,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           {tab === "characters" && <CharacterManager />}
           {tab === "lore" && <LorebookManager />}
           {tab === "translate" && <TranslateManager />}
-          {tab === "presets" && <PresetManager onClose={onClose} />}
+          {tab === "presets" && <PresetManager onBack={() => setTab(homeTab)} />}
           {tab === "sampler" && <SamplerManager />}
           {tab === "budget" && <BudgetPanel />}
           {tab === "regex" && <RegexManager />}
