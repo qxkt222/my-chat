@@ -1,10 +1,17 @@
 import { useState } from "react";
-import { Wand2, Plus, Trash2, Eye } from "lucide-react";
+import { Wand2, Plus, Trash2, Eye, Upload } from "lucide-react";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { applyRegexRules } from "@/lib/regex-format";
+import { looksLikeRegexSuite, parseTavernRegexSuite } from "@/lib/regex-import";
+import { readFile, pickFile } from "@/lib/tauri";
+import { showToast } from "@/components/ui/Toast";
 
-/** AI 回复样式后处理(酒馆 Regex):内置规则 + 自定义,渲染前生效 */
+/** AI 回复样式后处理(酒馆 Regex):内置规则 + 自定义,渲染前生效
+ *
+ *  2026-09-25 加导入：酒馆的「正则脚本套件」（JSON 数组，每项 findRegex）此前
+ *  在应用里没有入口 —— 开发者把它当预设导入，被误报成「这是角色卡」。
+ *  现在「样式」tab 可以直接导入，规则保留原有的 gi 标志与启用状态。 */
 export function RegexManager() {
   const t = useT();
   const s = useSettingsStore();
@@ -15,6 +22,35 @@ export function RegexManager() {
     replacement: string;
   } | null>(null);
   const [preview, setPreview] = useState("");
+
+  const importFromFile = async () => {
+    const path = await pickFile("正则套件 JSON", ["json"]);
+    if (!path) return;
+    try {
+      const raw = await readFile(path);
+      if (!looksLikeRegexSuite(raw)) {
+        showToast("error", t("regex.importFail"));
+        return;
+      }
+      const res = parseTavernRegexSuite(raw);
+      if (res.rules.length === 0) {
+        showToast("error", t("regex.importFail"));
+        return;
+      }
+      for (const rule of res.rules) await s.saveRegexRule(rule);
+      showToast(
+        "success",
+        res.promptOnlySkipped > 0
+          ? t("regex.importedPartial", {
+              n: String(res.rules.length),
+              k: String(res.promptOnlySkipped),
+            })
+          : t("regex.imported", { n: String(res.rules.length) })
+      );
+    } catch (e) {
+      showToast("error", `${t("regex.importFail")} ${String(e)}`);
+    }
+  };
 
   const startNew = () => setEditing({ id: "", name: "", pattern: "", replacement: "" });
   const startEdit = (id: string) => {
@@ -42,6 +78,12 @@ export function RegexManager() {
         <span className="text-[10px] text-muted-foreground">{t("regex.subtitle")}</span>
         <div className="flex-1" />
         <button
+          onClick={importFromFile}
+          className="px-2 py-1 text-[11px] rounded bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1"
+        >
+          <Upload className="w-3 h-3" /> {t("regex.import")}
+        </button>
+        <button
           onClick={startNew}
           className="px-2 py-1 text-[11px] rounded border border-input hover:bg-muted flex items-center gap-1"
         >
@@ -49,6 +91,7 @@ export function RegexManager() {
         </button>
       </div>
       <p className="text-[10px] text-muted-foreground">{t("regex.hint")}</p>
+      <p className="text-[10px] text-muted-foreground">{t("regex.hint2")}</p>
 
       {/* 规则列表 */}
       <div className="space-y-1">
