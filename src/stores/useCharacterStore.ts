@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import type { CharacterCard, CharacterBook, Persona, PromptPreset } from "@/types";
+import type {
+  CharacterCard,
+  CharacterBook,
+  Persona,
+  PromptPreset,
+  PresetRosterIndex,
+} from "@/types";
 import {
   getAppDir,
   readFile,
@@ -14,6 +20,17 @@ import {
 import { parseCharacterJson, toExportJson, buildExportPng } from "@/lib/character-card";
 import { parseTavernPresets } from "@/lib/preset-import";
 import { parseLorebook } from "@/lib/lorebook-import";
+import {
+  applyOrder,
+  emptyRosterIndex,
+  entryOrderOf,
+  groupOf,
+  migrateLegacyEntries,
+  moveWithin,
+} from "@/lib/preset-roster";
+
+/** 名册索引的文件名（放在 presets/ 下；load 时必须跳过它，否则会被当成一条预设） */
+export const ROSTER_INDEX_FILE = "roster-index.json";
 
 // ── 内置 RP 提示词预设(酒馆风格)───────────────────────────
 export const BUILTIN_PRESETS: PromptPreset[] = [
@@ -119,6 +136,16 @@ interface CharacterState {
   savePreset: (p: PromptPreset) => Promise<void>;
   removePreset: (id: string) => Promise<void>;
   getPreset: (id: string) => PromptPreset | undefined;
+
+  // ── 全局条目名册（2026-09-25）──────────────────────────────
+  // 开关与顺序都是**全局**的，与角色无关；角色只管自己的提示词与世界书。
+  /** 名册索引（包顺序 + 包内顺序），落盘 presets/roster-index.json */
+  rosterIndex: PresetRosterIndex | null;
+  loadRosterIndex: () => Promise<void>;
+  /** 切换某条条目是否参与拼装（全局） */
+  togglePresetEnabled: (id: string) => Promise<void>;
+  /** 把某条在它所属包内上移/下移一位；到端点时不做任何事 */
+  movePresetInGroup: (id: string, dir: -1 | 1) => Promise<void>;
 }
 
 function nowISO(): string {
@@ -136,6 +163,7 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
   lorebooks: {},
   enabledLorebookIds: [],
   presets: [...BUILTIN_PRESETS],
+  rosterIndex: null,
   loaded: false,
 
   load: async () => {
@@ -158,12 +186,93 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       const presets: PromptPreset[] = [...BUILTIN_PRESETS];
       for (const f of presetNames) {
         if (!f.endsWith(".json")) continue;
+        // ⚠️ 名册索引也住在 presets/ 下，它不是预设，必须跳过
+        if (f === ROSTER_INDEX_FILE) continue;
         try {
           const raw = await readFile(`${appDir}/presets/${f}`);
           presets.push(JSON.parse(raw) as PromptPreset);
         } catch {
           /* skip */
         }
+      }
+
+      // 名册索引（包顺序 + 包内顺序）。缺失/损坏一律退回空索引，不让它挡住启动。
+      let rosterIndex: PresetRosterIndex = emptyRosterIndex();
+      try {
+        const rawIdx = await readFile(`${appDir}/presets/${ROSTER_INDEX_FILE}`);
+        const parsed = JSON.parse(rawIdx) as Partial<PresetRosterIndex>;
+        rosterIndex = {
+          groupOrder: Array.isArray(parsed.groupOrder) ? parsed.groupOrder : [],
+          entryOrder:
+            parsed.entryOrder && typeof parsed.entryOrder === "object" ? parsed.entryOrder : {},
+          updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
+        };
+      } catch {
+        /* 首次运行没有这个文件，正常 */
+      }
+
+      // 索引重建：索引是「包顺序 + 包内顺序」的全局锚，缺了 UI 就没有稳定排序。
+      // 迁移过、或索引文件缺失时都重建一次（幂等：只按当前 presets 推导，不凭空造顺序）。
+      const buildIndexFrom = (list: PromptPreset[], prev: PresetRosterIndex): PresetRosterIndex => {
+        const groupsSeen: string[] = [];
+        const entryOrder: Record<string, string[]> = {};
+        for (const p of list) {
+          if (!p.id.startsWith("imp-")) continue; // 内置/自定义不入索引
+          const g = groupOf(p);
+          if (!groupsSeen.includes(g)) groupsSeen.push(g);
+          (entryOrder[g] ??= []).push(p.id);
+        }
+        // 包内按 order 排好再入索引
+        for (const g of Object.keys(entryOrder)) {
+          const ids = entryOrder[g] ?? [];
+          ids.sort((a, b) => {
+            const pa = list.find((x) => x.id === a);
+            const pb = list.find((x) => x.id === b);
+            return (pa?.order ?? Number.MAX_SAFE_INTEGER) - (pb?.order ?? Number.MAX_SAFE_INTEGER);
+          });
+          entryOrder[g] = ids;
+        }
+        return {
+          groupOrder: prev.groupOrder.length > 0 ? prev.groupOrder : groupsSeen,
+          entryOrder,
+          updated_at: nowISO(),
+        };
+      };
+
+      // 旧数据迁移：给没有 group/order 的导入条目补上（本机实测有 34 条这样的旧数据）。
+      // 补完落盘，否则每次启动都要重算，而且 UI 的排序没有稳定锚点。
+      // ⚠️ 迁移**不会**把任何条目变成已启用 —— 旧数据里没有当年的启用标记，
+      //    宁可全关也不能误开（「（默认组合）」那条 6.5 万字）。
+      try {
+        const migrated = migrateLegacyEntries(presets, "导入预设");
+        if (migrated.changed > 0) {
+          for (const p of migrated.presets) {
+            if (p.id.startsWith("imp-")) {
+              await writeFile(`${appDir}/presets/${p.id}.json`, JSON.stringify(p, null, 2));
+            }
+          }
+          presets.length = 0;
+          presets.push(...migrated.presets);
+        }
+      } catch {
+        /* 迁移失败不该挡住启动：内存里已是迁移后的结构，下次再试落盘 */
+      }
+
+      // 索引落盘：迁移过（changed>0）或索引文件本来就缺失时重建一次。
+      // 这样「包内排序」这条能力从首次启动起就有一个真实存在的锚，而不是
+      // 等用户第一次点上下移才凭空出现一个文件。
+      try {
+        const needsRebuild =
+          rosterIndex.entryOrder === undefined || Object.keys(rosterIndex.entryOrder).length === 0;
+        if (needsRebuild) {
+          rosterIndex = buildIndexFrom(presets, rosterIndex);
+          await writeFile(
+            `${appDir}/presets/${ROSTER_INDEX_FILE}`,
+            JSON.stringify(rosterIndex, null, 2)
+          );
+        }
+      } catch {
+        /* 索引写不进去不影响这一轮使用：内存里已经有可用顺序 */
       }
       // Persona 存 settings 树(JSON 数组)+ 全局激活 id;旧单值 lorebookId 迁移到数组
       let personas: Persona[] = [];
@@ -219,11 +328,90 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
         lorebooks,
         enabledLorebookIds,
         presets,
+        rosterIndex,
         loaded: true,
       });
     } catch {
       set({ loaded: true });
     }
+  },
+
+  loadRosterIndex: async () => {
+    try {
+      const appDir = await getAppDir();
+      const raw = await readFile(`${appDir}/presets/${ROSTER_INDEX_FILE}`);
+      const parsed = JSON.parse(raw) as Partial<PresetRosterIndex>;
+      set({
+        rosterIndex: {
+          groupOrder: Array.isArray(parsed.groupOrder) ? parsed.groupOrder : [],
+          entryOrder:
+            parsed.entryOrder && typeof parsed.entryOrder === "object" ? parsed.entryOrder : {},
+          updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
+        },
+      });
+    } catch {
+      set({ rosterIndex: emptyRosterIndex() });
+    }
+  },
+
+  togglePresetEnabled: async (id) => {
+    const cur = get().presets.find((p) => p.id === id);
+    if (!cur) return;
+    // 只认 === true 取反：旧数据没有这个键，`!p.enabled` 也得到 true，与 isEntryEnabled 同口径
+    const next: PromptPreset = { ...cur, enabled: cur.enabled !== true };
+    const appDir = await getAppDir();
+    // 内置预设不入盘（它们在代码里写死），开关状态只留在内存 + 索引文件里；
+    // 落盘失败不阻断内存更新，否则界面看起来「点了没反应」。
+    if (!cur.is_preset) {
+      try {
+        await writeFile(`${appDir}/presets/${id}.json`, JSON.stringify(next, null, 2));
+      } catch {
+        /* 落盘失败：内存仍生效，下次改动会再试 */
+      }
+    }
+    set((s) => ({ presets: s.presets.map((p) => (p.id === id ? next : p)) }));
+  },
+
+  movePresetInGroup: async (id, dir) => {
+    const s = get();
+    const cur = s.presets.find((p) => p.id === id);
+    if (!cur) return;
+    const group = groupOf(cur);
+    const inGroup = s.presets.filter((p) => groupOf(p) === group);
+    // 包内当前顺序以**索引**为准（它是全局锚），索引没记录时才回退到 order 字段
+    const byOrder = [...inGroup].sort(
+      (a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
+    );
+    const ids = entryOrderOf(
+      s.rosterIndex,
+      group,
+      byOrder.map((p) => p.id)
+    );
+    const nextIds = moveWithin(ids, id, dir);
+    if (!nextIds) return; // 已在端点，无需改动（也不落盘）
+
+    const appDir = await getAppDir();
+    const reordered = applyOrder(s.presets, nextIds);
+    const updated = reordered.filter((p) => !p.is_preset);
+    for (const p of updated) {
+      try {
+        await writeFile(`${appDir}/presets/${p.id}.json`, JSON.stringify(p, null, 2));
+      } catch {
+        /* 同上：不阻断内存更新 */
+      }
+    }
+    // 顺序写进索引：包内顺序是全局属性，需要一个与角色无关的锚
+    const nextIndex: PresetRosterIndex = {
+      groupOrder: s.rosterIndex?.groupOrder ?? [],
+      entryOrder: { ...(s.rosterIndex?.entryOrder ?? {}), [group]: nextIds },
+      updated_at: nowISO(),
+    };
+    try {
+      await writeFile(`${appDir}/presets/${ROSTER_INDEX_FILE}`, JSON.stringify(nextIndex, null, 2));
+    } catch {
+      /* ignore */
+    }
+    set({ presets: reordered, rosterIndex: nextIndex });
   },
 
   saveCharacter: async (card) => {

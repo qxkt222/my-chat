@@ -5,11 +5,18 @@
 // knowledge 尾部的顺序不变)。
 
 import type { CharacterCard, CharacterBook, Persona, PromptPreset, Message } from "@/types";
+import { assembleRoster } from "./preset-roster";
 
 export interface RpContext {
   card: CharacterCard;
   persona?: Persona | null | undefined;
-  preset?: PromptPreset | null | undefined;
+  /** 提示词模板来源，两种形态：
+   *   · PromptPreset      —— 单套预设（角色卡绑定的那一套，回退用）
+   *   · PromptPreset[]    —— **全局条目名册**（2026-09-25 起的主路径）：
+   *                          取其所有 enabled===true 的条目按 order 拼起来；
+   *                          一条都没启用时返回空串，于是自动回退到下面的单套形态。
+   *  单个对象会被当成「只有这一条且已启用」，便于旧调用点与单测不改。 */
+  preset?: PromptPreset | PromptPreset[] | null | undefined;
   /** 会话原有 system_prompt(技能/会话自定义) */
   baseSystemPrompt?: string | undefined;
   /** 全局世界书 + 角色内嵌书 + Persona 绑定的世界书(已合并) */
@@ -458,11 +465,17 @@ export function buildRpSystemParts(ctx: RpContext): {
 
   let template = "";
   if (card.system_prompt?.trim()) {
+    // 角色卡自己的提示词恒定最高优先 —— 「角色只管自己的提示词与世界书」
+    // （开发者 2026-09-25 确认的设计边界）
     template = card.system_prompt;
-  } else if (preset?.template) {
-    template = preset.template;
   } else {
+    // 名册路径：数组形态 → 取所有已启用条目按 order 拼装（一条都没启用就是空串）
+    const rosterText = Array.isArray(preset) ? assembleRoster(preset) : "";
+    // 回退路径：单套预设（数组形态下它已被名册取代，不再参与）
+    const singleText = Array.isArray(preset) ? "" : (preset?.template ?? "");
     template =
+      rosterText.trim() ||
+      singleText ||
       "你扮演 {{char}}。{{description}} {{personality}} {{scenario}} 与 {{user}} 对话,保持角色。";
   }
 

@@ -149,7 +149,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           charStore.personas.find((p) => p.id === conv.persona_id) ||
           charStore.getActivePersona() ||
           null;
-        const preset = charStore.getPreset(card.presetId || "preset-classic-char") || null;
         // 世界书四源合并复用酒馆那份实现（同一套优先级，不再各写一遍）
         const books = collectLorebooks({
           globalLorebook: charStore.globalLorebook,
@@ -162,7 +161,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const parts = buildRpSystemParts({
           card,
           persona,
-          preset,
+          preset: charStore.presets,
           baseSystemPrompt: systemPrompt,
           lorebooks: books,
           recentMessages: conv.messages,
