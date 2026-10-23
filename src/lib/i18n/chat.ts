@@ -1,5 +1,5 @@
 // lib/i18n/chat.ts — 由 i18n.ts 按 key 前缀拆出（自动生成，勿手工搬运 key）
-// 条目数：100
+// 条目数：102
 
 export const chatMessages: Record<string, Record<string, string>> = {
   "task.running": { zh: "运行中", en: "Running" },
@@ -18,6 +18,14 @@ export const chatMessages: Record<string, Record<string, string>> = {
     zh: "输入消息... Enter 发送, Shift+Enter 换行",
     en: "Message... Enter to send, Shift+Enter for new line",
   },
+  "chat.placeholderModel": {
+    zh: "给 {model} 发消息...（Enter 发送）",
+    en: "Message {model}... (Enter to send)",
+  },
+  "chat.sendTitle": { zh: "发送（Enter）", en: "Send (Enter)" },
+  "chat.stopTitle": { zh: "停止（Esc）", en: "Stop (Esc)" },
+  "chat.chainSteps": { zh: "{n} 步", en: "{n} steps" },
+  "chat.ragModeVector": { zh: "向量", en: "Vector" },
   "chat.noModel": { zh: "请先在设置中配置模型", en: "Configure a model in settings first" },
   "chat.stop": { zh: "停止", en: "Stop" },
   "chat.regenerate": { zh: "重新生成", en: "Regenerate" },
@@ -90,6 +98,14 @@ export const chatMessages: Record<string, Record<string, string>> = {
     zh: "缓存命中 {pct}%（{hit}/{total} tokens）",
     en: "Cache hit {pct}% ({hit}/{total} tokens)",
   },
+  "chat.budgetNear": {
+    zh: "上下文已用 {pct}%（约 {used}/{budget} tokens），接近模型上限",
+    en: "Context at {pct}% (~{used}/{budget} tokens), nearing the model limit",
+  },
+  "chat.budgetOver": {
+    zh: "上下文已超出预算（{used}/{budget}），历史消息已保留未裁剪",
+    en: "Context over budget ({used}/{budget}); history kept, not trimmed",
+  },
   "chat.requestFailedToast": { zh: "「{name}」请求失败", en: '"{name}" request failed' },
   "chat.unknownError": {
     zh: "未知错误（详见 AppData\\Roaming\\com.my-chat\\chat_errors.log）",
@@ -152,6 +168,24 @@ export const chatMessages: Record<string, Record<string, string>> = {
     zh: "未知命令 /{cmd}，可用：{list}",
     en: "Unknown command /{cmd}. Available: {list}",
   },
+  // ── 错误命名化（errorTitleKey / errorHintKey 的文案）──
+  "error.rateLimitTitle": { zh: "请求被限流 (429)", en: "Rate limited (429)" },
+  "error.timeoutTitle": { zh: "请求超时", en: "Request timed out" },
+  "error.authTitle": { zh: "认证失败 (401/403)", en: "Authentication failed (401/403)" },
+  "error.overloadTitle": { zh: "服务过载 (5xx)", en: "Service overloaded (5xx)" },
+  "error.rejectedTitle": { zh: "连接被拒绝", en: "Connection refused" },
+  "error.genericTitle": { zh: "请求失败", en: "Request failed" },
+  "error.rateLimitHint": {
+    zh: "稍后再试，或切换更快/更便宜模型",
+    en: "Try again later, or switch to a faster/cheaper model",
+  },
+  "error.timeoutHint": { zh: "可点「重试」重新生成", en: 'Click "Retry" to regenerate' },
+  "error.authHint": { zh: "检查 API Key 是否正确", en: "Check whether the API key is correct" },
+  "error.overloadHint": {
+    zh: "模型过载，稍后再试或切换模型",
+    en: "Model overloaded — retry later or switch models",
+  },
+  "error.rejectedHint": { zh: "检查网络/代理连接", en: "Check the network/proxy connection" },
   // ── 翻译引擎(非 AI)──
   "translate.title": { zh: "翻译引擎", en: "Translate Engine" },
   "translate.subtitle": {

@@ -11,7 +11,10 @@ use base64::Engine as _;
 /// trailing JSON) into the frontend for parsing.
 #[tauri::command]
 pub fn read_file_bytes(path: String) -> Result<String, String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("Read error: {e}"))?;
+    // 读侧准入：应用数据目录内，或经文件对话框登记过的路径（RS-05）。
+    let p = crate::resolve_readable_path(&path)?;
+    crate::check_read_size(&p, crate::MAX_READ_BYTES)?;
+    let bytes = std::fs::read(&p).map_err(|e| format!("Read error: {e}"))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -20,7 +23,7 @@ pub fn read_file_bytes(path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn write_file_bytes(path: String, base64_data: String) -> Result<(), String> {
     // 写侧一律过守卫（头像、导出卡都落在应用数据目录内）；
-    // 读侧 read_file_bytes 故意不设限 —— 导入要读用户从对话框选的文件。
+    // 读侧 read_file_bytes 走 resolve_readable_path（目录内或对话框令牌）。
     let p = crate::guard_path(&path)?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {e}"))?;
@@ -28,5 +31,6 @@ pub fn write_file_bytes(path: String, base64_data: String) -> Result<(), String>
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_data.trim())
         .map_err(|e| format!("Base64 decode error: {e}"))?;
-    std::fs::write(&p, &bytes).map_err(|e| format!("Write error: {e}"))
+    std::fs::write(&p, &bytes).map_err(|e| format!("Write error: {e}"))?;
+    crate::verify_write_inside_app_dir(&p)
 }

@@ -10,6 +10,12 @@ import type {
 } from "@/types";
 import { BUILTIN_REGEX_RULES, type RegexRule } from "@/lib/regex-format";
 import {
+  sanitizeBudgetConfig,
+  sanitizeConnectionProfiles,
+  sanitizeRegexRules,
+  sanitizeStringArray,
+} from "@/lib/persist-sanitize";
+import {
   dbSaveModel,
   dbListModelsDecrypted,
   dbDeleteModel,
@@ -164,7 +170,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const paramsRaw = await dbGetSetting("default_parameters");
       if (paramsRaw) {
         try {
-          defaultParameters = { ...defaultParameters, ...JSON.parse(paramsRaw) };
+          // parseParams 已逐字段 typeof 校验，坏 JSON/坏字段都回落到默认值
+          defaultParameters = { ...defaultParameters, ...parseParams(paramsRaw) };
         } catch {
           /* ignore bad JSON */
         }
@@ -202,7 +209,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       let regexRules: RegexRule[] = [...BUILTIN_REGEX_RULES];
       try {
         const raw = await dbGetSetting("regex_rules");
-        if (raw) regexRules = [...(JSON.parse(raw) as RegexRule[])];
+        // 坏 placement（如 "2"）曾一路带到渲染层 → TypeError 白屏；这里先收敛成合法结构
+        if (raw) regexRules = sanitizeRegexRules(JSON.parse(raw));
       } catch {
         /* ignore */
       }
@@ -233,7 +241,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       let budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET };
       try {
         const raw = await dbGetSetting("budget_config");
-        if (raw) budgetConfig = { ...DEFAULT_BUDGET, ...(JSON.parse(raw) as BudgetConfig) };
+        if (raw) budgetConfig = sanitizeBudgetConfig(JSON.parse(raw));
       } catch {
         /* ignore */
       }
@@ -241,7 +249,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       let stoppingStrings: string[] = [];
       try {
         const raw = await dbGetSetting("stopping_strings");
-        if (raw) stoppingStrings = JSON.parse(raw) as string[];
+        if (raw) stoppingStrings = sanitizeStringArray(JSON.parse(raw));
       } catch {
         /* ignore */
       }
@@ -249,7 +257,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       let connectionProfiles: ConnectionProfile[] = [];
       try {
         const raw = await dbGetSetting("connection_profiles");
-        if (raw) connectionProfiles = JSON.parse(raw) as ConnectionProfile[];
+        if (raw) connectionProfiles = sanitizeConnectionProfiles(JSON.parse(raw));
       } catch {
         /* ignore */
       }

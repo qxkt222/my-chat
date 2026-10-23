@@ -120,36 +120,47 @@ export function shrinkMessages(
   }
 
   // 自动模式:从最低优先级向上逐级移除
-  let working = [...msgs];
+  // 注意:seg.indices / historyIndices 都是「原始下标」,所以 removed 也必须记原始下标,
+  // 循环期间不要动数组;否则每删一次下标就位移,后续段会砍到别的消息。
   const removed = new Set<number>();
   const canDrop = [...segments]
     .filter((s) => s.priority >= 1)
     .sort((a, b) => b.priority - a.priority);
+  let remaining = total0;
   for (const seg of canDrop) {
-    if (working.reduce((s, m) => s + estimateTokens(m.content), 0) <= budget) break;
+    if (remaining <= budget) break;
     // 世界书降级:先只砍 P5,再 P3/2/1(保 P0)
-    if (seg.priority === 0) continue;
     for (const i of seg.indices) removed.add(i);
-    working = working.filter((_, i) => !removed.has(i));
+    remaining -= tokenOf(seg.indices);
   }
 
-  // 历史仍超限 → 整段替换为摘要(保三段式前缀稳定,缓存不失效)
-  let historyKept = working.filter((_, i) => !historyIndices.includes(i));
-  let historyMsgs = working.filter((_, i) => historyIndices.includes(i));
+  // 循环结束后一次性按原始下标过滤,并同样按原始下标区分历史/非历史
+  const historySet = new Set(historyIndices);
+  let historyKept: Pick<Message, "role" | "content">[] = [];
+  let historyMsgs: Pick<Message, "role" | "content">[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (removed.has(i)) continue;
+    const m = msgs[i];
+    if (!m) continue;
+    if (historySet.has(i)) historyMsgs.push(m);
+    else historyKept.push(m);
+  }
+
+  // 历史仍超限 → 整段替换为摘要(保三段式前缀稳定,缓存不失效);
+  // 没有可用摘要时保留历史,绝不静默删光(超限由 over 标记)。
+  const summaryText = opts.summary?.trim() ?? "";
   if (historyMsgs.length > 0) {
     const histTokens = historyMsgs.reduce((s, m) => s + estimateTokens(m.content), 0);
-    const sumTokens = estimateTokens(opts.summary || "");
-    if (histTokens > 0 && sumTokens < histTokens) {
-      if (opts.summary?.trim()) {
-        historyKept = [
-          ...historyKept,
-          { role: "system" as const, content: `【对话摘要】\n${opts.summary.trim()}` },
-        ];
-      }
+    const sumTokens = estimateTokens(summaryText);
+    if (summaryText && sumTokens < histTokens) {
+      historyKept = [
+        ...historyKept,
+        { role: "system" as const, content: `【对话摘要】\n${summaryText}` },
+      ];
       historyMsgs = [];
     }
   }
-  working = [...historyKept, ...historyMsgs];
+  const working = [...historyKept, ...historyMsgs];
 
   const final = working;
   const over = final.reduce((s, m) => s + estimateTokens(m.content), 0) > budget;

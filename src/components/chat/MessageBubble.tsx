@@ -14,7 +14,7 @@ import type { Message } from "@/types";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { applyRegexRules } from "@/lib/regex-format";
-import { errorTitle, errorHint } from "@/lib/tauri";
+import { errorTitleKey, errorHintKey } from "@/lib/tauri";
 import { countTokens, formatTokens } from "@/lib/token-counter";
 import { StreamCursor } from "./StreamCursor";
 
@@ -94,6 +94,12 @@ export const MessageBubble = memo(function MessageBubble({
     () => applyRegexRules(rawContent, regexRules),
     [rawContent, regexRules]
   );
+
+  // 错误命名化：kind → i18n key（tauri.ts 保持纯函数，文案在渲染层按 locale 取）
+  const errorTitle = message.errorKind
+    ? t(errorTitleKey(message.errorKind))
+    : t("chat.requestFailed");
+  const errorHint = message.errorKind ? errorHintKey(message.errorKind) : null;
 
   // 角色扮演显示名:assistant 优先角色名,user 优先 Persona 名;否则回退模型名/You
   const displayName = isUser ? rpUserName || "You" : rpCharName || message.model || "AI";
@@ -203,16 +209,10 @@ export const MessageBubble = memo(function MessageBubble({
             {/* F4 + 错误命名化: 请求错误独立横幅——按 kind 差异化标题/提示,失败不污染正文 */}
             {message.error && !streaming && (
               <div className="mt-2 px-3 py-2 rounded-md border border-destructive/30 bg-destructive/5 text-destructive text-xs whitespace-pre-wrap break-words">
-                <span className="font-medium block mb-0.5">
-                  {message.errorKind
-                    ? errorTitle(message.errorKind as never)
-                    : t("chat.requestFailed")}
-                </span>
+                <span className="font-medium block mb-0.5">{errorTitle}</span>
                 <span className="text-destructive/90">{message.error}</span>
-                {message.errorKind && errorHint(message.errorKind as never) && (
-                  <span className="block mt-1 text-destructive/70">
-                    💡 {errorHint(message.errorKind as never)}
-                  </span>
+                {errorHint && (
+                  <span className="block mt-1 text-destructive/70">💡 {t(errorHint)}</span>
                 )}
                 {(message.errorKind === "timeout" || message.errorKind === "rate_limit") &&
                   onRetry && (

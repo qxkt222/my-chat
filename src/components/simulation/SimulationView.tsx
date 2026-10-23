@@ -53,9 +53,11 @@ export function SimulationView({ onOpenSettings }: Props) {
   const [diceTh, setDiceTh] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // 依赖用稳定的动作引用,不能依赖整店对象 `sim`(每次 set 都是新引用)
+  const loadSim = useSimulationStore((s) => s.load);
   useEffect(() => {
-    void sim.load();
-  }, [sim]);
+    void loadSim();
+  }, [loadSim]);
 
   const active = sim.getActive();
   const model = models.find((m) => m.name === activeModel);

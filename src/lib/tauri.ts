@@ -9,11 +9,15 @@ import type {
   DbMsgDto,
   DbModelDto,
   DbSkillDto,
+  ErrorKind,
   McpServerDto,
   McpToolDto,
   McpToolResultDto,
   BackupInfoDto,
 } from "@/types";
+
+// ErrorKind 放在 types 层，避免 Message 反向依赖 IPC 层；这里保留同名再导出。
+export type { ErrorKind } from "@/types";
 
 // ── Chat ────────────────────────────────────────────────
 // Each in-flight stream is keyed by its frontend-generated request_id,
@@ -121,8 +125,6 @@ export function cancelChat(requestId: string): void {
 // Rust 侧把上游错误统一格式化为 `API error {status}: {text}`，前端在这里按
 // 类型归类，让气泡能按 kind 渲染差异化文案与重试建议（限流/超时/拒绝/未知）。
 
-export type ErrorKind = "rate_limit" | "timeout" | "rejected" | "auth" | "overload" | "unknown";
-
 export interface ClassifiedError {
   kind: ErrorKind;
   message: string;
@@ -144,44 +146,77 @@ export function classifyError(raw: string): ClassifiedError {
   return { kind: "unknown", message: s };
 }
 
-/** 错误横幅标题（按 kind）——供 MessageBubble 差异化渲染 */
-export function errorTitle(kind: ErrorKind): string {
+/** 错误横幅标题的 i18n key（按 kind）——保持纯函数，渲染层用 t() 取文案 */
+export function errorTitleKey(kind: ErrorKind): string {
   switch (kind) {
     case "rate_limit":
-      return "请求被限流 (429)";
+      return "error.rateLimitTitle";
     case "timeout":
-      return "请求超时";
+      return "error.timeoutTitle";
     case "auth":
-      return "认证失败 (401/403)";
+      return "error.authTitle";
     case "overload":
-      return "服务过载 (5xx)";
+      return "error.overloadTitle";
     case "rejected":
-      return "连接被拒绝";
+      return "error.rejectedTitle";
     default:
-      return "请求失败";
+      return "error.genericTitle";
   }
 }
 
-/** 错误重试建议（按 kind）——差异化提示文案 */
-export function errorHint(kind: ErrorKind): string | null {
+/** 错误重试建议的 i18n key（按 kind）——null = 不显示 */
+export function errorHintKey(kind: ErrorKind): string | null {
   switch (kind) {
     case "rate_limit":
-      return "稍后再试，或切换更快/更便宜模型";
+      return "error.rateLimitHint";
     case "timeout":
-      return "可点「重试」重新生成";
+      return "error.timeoutHint";
     case "auth":
-      return "检查 API Key 是否正确";
+      return "error.authHint";
     case "overload":
-      return "模型过载，稍后再试或切换模型";
+      return "error.overloadHint";
     case "rejected":
-      return "检查网络/代理连接";
+      return "error.rejectedHint";
     default:
       return null;
   }
 }
 
+// ── 创建类 IPC 的输入类型 ────────────────────────────────
+// 之前统一用 Partial<Dto>，于是 dbCreateConv({}) 也能编译，运行时才在 Rust 侧
+// 报缺字段/写出一条空会话。创建接口的必填字段必须与 Rust 结构体对齐。
+export type DbConvCreateInput = Pick<
+  DbConvDto,
+  "id" | "title" | "model_name" | "system_prompt" | "created_at" | "updated_at"
+> &
+  Partial<Pick<DbConvDto, "character_id" | "persona_id" | "summary" | "summary_msg_count">>;
+
+export type DbMsgCreateInput = Pick<
+  DbMsgDto,
+  "id" | "conv_id" | "role" | "content" | "timestamp" | "token_count"
+> &
+  Partial<Pick<DbMsgDto, "model" | "reasoning" | "seq" | "error" | "error_kind" | "bookmarked">>;
+
+/** save_model 用 name 作主键，没有单独的 id 字段 —— 六个字段都必填 */
+export type DbModelSaveInput = DbModelDto;
+
+export type DbSkillCreateInput = Pick<
+  DbSkillDto,
+  | "id"
+  | "name"
+  | "description"
+  | "system_prompt"
+  | "model"
+  | "temperature"
+  | "category"
+  | "tags_json"
+  | "created_at"
+  | "updated_at"
+> &
+  Partial<Pick<DbSkillDto, "tools_json" | "memory_tags">>;
+
 // ── DB: Conversations ────────────────────────────────────
-export function dbCreateConv(conv: Partial<DbConvDto>): Promise<void> {
+export function dbCreateConv(conv: DbConvCreateInput): Promise<void> {
   return invoke("create_conv", { conv });
 }
 export function dbListConvs(): Promise<DbConvDto[]> {
@@ -217,7 +252,7 @@ export function dbUpdateConvSummary(
 ): Promise<void> {
   return invoke("update_conv_summary", { id, summary, summaryMsgCount, updatedAt });
 }
-export function dbAddMsg(msg: Partial<DbMsgDto>): Promise<void> {
+export function dbAddMsg(msg: DbMsgCreateInput): Promise<void> {
   return invoke("add_msg", { msg });
 }
 /** P1 热路径批量化：一次 IPC 插入多条消息 + 更新会话标题/时间戳 */
@@ -254,7 +289,7 @@ export function dbClearMessages(convId: string): Promise<void> {
 }
 
 // ── DB: Models / Settings ────────────────────────────────
-export function dbSaveModel(model: Partial<DbModelDto>): Promise<void> {
+export function dbSaveModel(model: DbModelSaveInput): Promise<void> {
   return invoke("save_model", { model });
 }
 export function dbListModels(): Promise<DbModelDto[]> {
@@ -278,7 +313,7 @@ export function dbSaveSetting(key: string, value: string): Promise<void> {
 }
 
 // ── DB: Skills ───────────────────────────────────────────
-export function dbCreateSkill(skill: Partial<DbSkillDto>): Promise<void> {
+export function dbCreateSkill(skill: DbSkillCreateInput): Promise<void> {
   return invoke("create_skill", { skill });
 }
 export function dbListSkills(): Promise<DbSkillDto[]> {
@@ -372,6 +407,26 @@ export function mcpListGrants(): Promise<McpGrantDto[]> {
 }
 export function mcpAudit(limit: number): Promise<McpAuditDto[]> {
   return invoke("mcp_audit", { limit });
+}
+
+/** 后端 → 前端：请求用户对一次 MCP 工具调用授权（全局事件）。 */
+export const MCP_PERMISSION_REQUEST_EVENT = "mcp-permission-request";
+export interface McpPermissionRequestDto {
+  request_id: string;
+  server_id: string;
+  server_name: string;
+  tool: string;
+  /** 已脱敏并截断的参数摘要，仅用于展示，不要回传。 */
+  args_preview: string;
+}
+export type McpPermissionAnswer = "allow" | "deny";
+/** 回执：`remember=true` 时后端把 allow/deny 写回权限策略（「始终允许」）。 */
+export function mcpResolvePermission(
+  requestId: string,
+  answer: McpPermissionAnswer,
+  remember: boolean
+): Promise<void> {
+  return invoke("mcp_resolve_permission", { requestId, answer, remember });
 }
 
 // ── Backup / WebDAV ──────────────────────────────────────

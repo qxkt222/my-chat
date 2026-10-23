@@ -3,6 +3,8 @@
 // 在渲染前对回复文本做正则替换(不改原始数据,规则可随时开关,历史消息也生效)。
 // 内置规则 + 用户自定义规则;每条规则独立 try/catch,坏正则跳过不影响其他。
 
+import { compileRegex } from "./regex-cache";
+
 export interface RegexRule {
   id: string;
   name: string;
@@ -76,7 +78,10 @@ export function applyRegexRules(content: string, rules: RegexRule[]): string {
     if (!appliesToDisplay(r)) continue;
     try {
       // 标志：规则自带优先（酒馆导入的带 i），否则沿用历史上的 "g"
-      out = out.replace(new RegExp(r.pattern, r.flags || "g"), r.replacement);
+      // 编译走共享缓存（SRC-14）：流式渲染时同一批规则不会每 token 重编译一遍
+      const re = compileRegex(r.pattern, r.flags || "g");
+      if (!re) continue; // 坏/超长正则：compileRegex 返回 null，跳过本条
+      out = out.replace(re, r.replacement);
     } catch {
       /* 坏正则跳过 */
     }

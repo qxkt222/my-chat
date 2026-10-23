@@ -36,7 +36,7 @@
  *   node scripts/gate.mjs typecheck | lint | format | rustfmt | test | coverage | build | all
  *   node scripts/gate.mjs rust-check | rust-test | rust-clippy
  *   node scripts/gate.mjs assert-git     版本控制基线是否真的成立
- *   node scripts/gate.mjs assert-tests   0 失败且用例数不低于基线
+ *   node scripts/gate.mjs assert-tests   0 失败、通过数 ≥ 基线、跳过数 ≤ 上限
  *   node scripts/gate.mjs assert-lint    0 错误且告警数不超基线
  *   node scripts/gate.mjs assert-format  prettier 不合格文件数不超基线
  *   node scripts/gate.mjs assert-rustfmt rustfmt 无 diff
@@ -71,10 +71,18 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE = process.execPath;
 
-/** 基线读数(2026-09-19 升级前实测)。断言以此为地板/天花板。 */
+/** 基线读数(2026-10-23 实测)。断言以此为地板/天花板。 */
 const BASELINE = {
-  trackedFiles: 234, // git ls-files 实测
-  minTests: 34, // vitest numPassedTests 实测
+  trackedFiles: 280, // git ls-files 实测(2026-10-23,分支 audit-fixes-20261023)
+  // 2026-10-23 实测:vitest numPassedTests = 180。
+  // 旧值 34 是 9-19 升级前的读数,随后用例涨到 180 却没人抬 ——
+  // 删掉 140 多条用例闸门照样绿灯,与「判据要能证伪」相悖。
+  minTests: 180,
+  // 2026-10-23 实测 numPendingTests(skipped)= 5,全部来自
+  // src/lib/real-suite-check.test.tsx —— 依赖本机 FF5 Regex 3.0 Suite.json,
+  // 文件不存在时 describe.skipIf 整组跳过。assert-tests 原先只查 failed=0,
+  // 这 5 条静默消失仍是绿灯;现加跳过上限,超限直接红并列出被跳过的用例。
+  maxSkippedTests: 5,
   // 2026-09-25 最严健康度审查：4 → 0。
   // 原值把「升级前的实测值」当成了容忍上限，于是 eslint 报 3 条告警时 lint 闸门照样绿灯 ——
   // 标准写着「0 警告」，闸门却放行 4 条。现清零，并给 lint 闸门加 --max-warnings 0。
@@ -278,7 +286,7 @@ const GATES = {
   },
 
   "assert-tests": {
-    desc: "单测断言:0 失败且通过数不低于基线",
+    desc: "单测断言:0 失败、通过数 ≥ 基线、跳过数 ≤ 上限",
     run: () => {
       const report = path.join(TMP, "vitest-report.json");
       console.log("\n跑 vitest 并产出 JSON 报告…");
@@ -292,8 +300,11 @@ const GATES = {
         return 1;
       }
       const j = JSON.parse(readFileSync(report, "utf8"));
+      // vitest 的 JSON 是 Jest 形状:跳过数记在 numPendingTests,
+      // 并没有 numSkippedTests 这个键。两个都读,兼容 reporter 变化。
+      const skipped = j.numSkippedTests ?? j.numPendingTests ?? 0;
       console.log(
-        `  total=${j.numTotalTests} passed=${j.numPassedTests} failed=${j.numFailedTests} files=${j.testResults?.length ?? "?"}`
+        `  total=${j.numTotalTests} passed=${j.numPassedTests} failed=${j.numFailedTests} skipped=${skipped} files=${j.testResults?.length ?? "?"}`
       );
       check(j.numFailedTests === 0, "失败用例数 == 0", `实测 ${j.numFailedTests}`);
       check(
@@ -301,6 +312,23 @@ const GATES = {
         `通过用例数 ≥ 基线 ${BASELINE.minTests}`,
         `实测 ${j.numPassedTests}`
       );
+      check(
+        skipped <= BASELINE.maxSkippedTests,
+        `跳过用例数 ≤ 上限 ${BASELINE.maxSkippedTests}`,
+        `实测 ${skipped}`
+      );
+      // 超限时把被跳过的用例逐条列出来 —— 只报一个数字无法定位是哪组静静消失了。
+      if (skipped > BASELINE.maxSkippedTests) {
+        console.error(`✗ 跳过用例超上限 ${BASELINE.maxSkippedTests}(实测 ${skipped} 条):`);
+        for (const f of j.testResults ?? []) {
+          for (const a of f.assertionResults ?? []) {
+            if (a.status === "skipped" || a.status === "pending" || a.status === "todo") {
+              const file = path.basename(f.name ?? "?");
+              console.error(`   · ${file} :: ${a.fullName ?? a.title ?? "(未命名)"}`);
+            }
+          }
+        }
+      }
       check(j.success === true, "vitest success == true", `实测 ${j.success}`);
       return finish("assert-tests");
     },
@@ -386,6 +414,8 @@ const GATES = {
       //    控制台 "All files" 报 22.6%（含全部源文件为分母）——两个数不是同一个量；
       //    而且当时读到的 JSON 还是前一晚 23:49 的旧文件（当天根本没更新）。
       //    地板与 vite.config.ts 的 thresholds 都按控制台口径，才能与闸门退出码同源。
+      //    2026-10-23 起 vitest 的 json-summary 也显式写到仓库根 coverage/(见 vite.config.ts
+      //    的 reportsDirectory),读数与这里同源;但断言仍只认控制台,不读 JSON。
       const r = capture(NODE, [BIN.vitest, "run", "--coverage"]);
       if (r.status !== 0) {
         console.error(`✗ 覆盖率闸门本身失败(exit ${r.status}),无法断言读数`);
@@ -410,7 +440,9 @@ const GATES = {
       console.log(
         `  All files: stmts=${got.statements} branch=${got.branches} funcs=${got.functions} lines=${got.lines}`
       );
-      const floors = { lines: 20, statements: 19, functions: 11, branches: 14 };
+      // 2026-10-23 实测 24.89/19.46/15.75/25.84(stmts/branch/funcs/lines)。
+      // 地板取实测下方约 2 个点:拦断崖式倒退,不追求好看。
+      const floors = { lines: 23, statements: 22, functions: 13, branches: 17 };
       for (const [k, floor] of Object.entries(floors)) {
         const v = got[k];
         console.log(`  ${k} = ${v}% (地板 ${floor}%)`);
@@ -467,7 +499,7 @@ if (!which || !GATES[which]) {
   console.log(`\n项目根: ${ROOT}`);
   console.log(`cargo:  ${CARGO}`);
   console.log(
-    `基线:   文件 ${BASELINE.trackedFiles} · 用例 ${BASELINE.minTests} · 告警 ≤${BASELINE.maxLintWarnings}`
+    `基线:   文件 ${BASELINE.trackedFiles} · 用例 ${BASELINE.minTests} · 跳过 ≤${BASELINE.maxSkippedTests} · 告警 ≤${BASELINE.maxLintWarnings}`
   );
   process.exit(which ? 2 : 0);
 }

@@ -2,6 +2,11 @@
 name = "my-chat"
 version = "0.2.0"
 edition = "2021"
+# 代码用到的最高 std 特性是 Duration::from_mins(稳定于 1.91.0,
+# 依据本机 rustc 1.97.1 自带 std 文档的稳定性标注;LazyLock=1.80、
+# Option::is_none_or=1.82 均低于它)。低于 1.91 的编译器没有该 API,
+# 直接编译失败,故声明 1.91。
+rust-version = "1.91"
 
 [lints.rust]
 # unsafe fn 内部必须显式 unsafe 块(encryption.rs DPAPI FFI 已满足)
@@ -43,7 +48,6 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 sled = "0.34"
 base64 = "0.22"
-once_cell = "1"
 # 原生文件选择对话框（知识库导入）
 rfd = "0.15"
 # PDF 文本提取（知识库文档解析）

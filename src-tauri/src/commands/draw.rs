@@ -14,7 +14,9 @@ pub async fn generate_image(
     model: String,
     size: String,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    // 出图与下载都用图片专用客户端：连接 10s、总超时 300s、不跟随重定向。
+    // 旧实现用通用 client() 的 120s 总超时，慢速出图模型会被提前切断。
+    let client = crate::net::image_client();
     let body = serde_json::json!({
         "model": model,
         "prompt": prompt,
@@ -50,11 +52,20 @@ pub async fn generate_image(
 
     if let Some(u) = data["url"].as_str() {
         // 远程 URL：直接下载到本地（避免外链失效 + 前端直连外网）
-        let bytes = client
+        let resp = client
             .get(u)
             .send()
             .await
-            .map_err(|e| format!("下载图片失败: {e}"))?
+            .map_err(|e| format!("下载图片失败: {e}"))?;
+        // 客户端禁用了重定向（RS-07）：3xx 会原样返回，不能把跳转页当成图片
+        // 写进 .png，必须显式报错。
+        if !resp.status().is_success() {
+            return Err(format!(
+                "下载图片失败: HTTP {}（客户端不跟随重定向）",
+                resp.status().as_u16()
+            ));
+        }
+        let bytes = resp
             .bytes()
             .await
             .map_err(|e| format!("读取图片失败: {e}"))?;

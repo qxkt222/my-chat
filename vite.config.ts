@@ -28,6 +28,11 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],
+      // ⚠️ 根目录是 "src",默认会把报告写进 src/coverage/ —— 仓库根的 coverage/
+      //    于是长期留着旧件(2026-10-23 实测根目录那份还是 9-24 的,lines 60.46%,
+      //    而当天真实值是 25.84%)。显式指回仓库根,让 json-summary 与控制台
+      //    "All files" 行落在同一份数据上,避免再读到陈旧的高读数。
+      reportsDirectory: "../coverage",
       // ⚠️ 不要设 exclude：实测（2026-09-25）它**会覆盖** v8 provider 的默认排除表，
       // 把 node_modules/.vite 缓存等一并纳入统计，全局读数从 60.46% 崩到 22.6%。
       // 要排除某些文件，应把默认表抄全后再追加，而不是只写自己的几条。
@@ -44,11 +49,13 @@ export default defineConfig({
       // 阈值 = 地板：按实测再下留约 2 个点，作用是拦住断崖式倒退（比如某次改动
       // 删掉一堆测试、或把大模块从测试里摘出去），不是宣称覆盖率好看。
       // 绝大多数 UI 组件仍是 0%（组件测试只有 4 个文件），要提高得先补测试再抬这里。
+      // 2026-10-23 实测:24.89 / 19.46 / 15.75 / 25.84(stmts/branch/funcs/lines)。
+      // 地板取实测下方约 2 个点,与 scripts/gate.mjs 的 assert-coverage 保持一致。
       thresholds: {
-        lines: 20,
-        statements: 19,
-        functions: 11,
-        branches: 14,
+        lines: 23,
+        statements: 22,
+        functions: 13,
+        branches: 17,
       },
     },
   },

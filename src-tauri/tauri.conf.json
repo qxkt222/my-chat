@@ -23,11 +23,15 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:* http://127.0.0.1:* https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "**"
+          "$DATA/com.my-chat/characters/avatars/**",
+          "$DATA/com.my-chat/generated/**",
+          "$HOME/AppData/Roaming/com.my-chat/characters/avatars/**",
+          "$HOME/AppData/Roaming/com.my-chat/generated/**"
         ]
       }
     }

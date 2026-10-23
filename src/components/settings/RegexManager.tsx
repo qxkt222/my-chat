@@ -3,6 +3,7 @@ import { Wand2, Plus, Trash2, Eye, Upload } from "lucide-react";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { applyRegexRules } from "@/lib/regex-format";
+import { compileRegex } from "@/lib/regex-cache";
 import { looksLikeRegexSuite, parseTavernRegexSuite } from "@/lib/regex-import";
 import { readFile, pickFile } from "@/lib/tauri";
 import { showToast } from "@/components/ui/Toast";
@@ -202,23 +203,11 @@ export function RegexManager({ onBack }: { onBack?: (() => void) | undefined }) 
             {s.regexRules
               .filter((r) => r.enabled)
               .map((r) => {
-                try {
-                  const re = new RegExp(r.pattern, "g");
-                  const hits = (preview.match(re) || []).length;
-                  return (
-                    <span
-                      key={r.id}
-                      className={`text-[9px] px-1.5 py-px rounded-full ${
-                        hits > 0
-                          ? "bg-emerald-500/15 text-emerald-500"
-                          : "bg-muted text-muted-foreground/60"
-                      }`}
-                      title={r.pattern}
-                    >
-                      {r.name} ×{hits}
-                    </span>
-                  );
-                } catch {
+                // 与 applyRegexRules 保持同一口径：规则自带 flags 优先，缺省 "g"。
+                // 旧实现硬编码 "g" —— 带 `i` 的导入规则预览命中数与实际替换不一致。
+                const flags = r.flags || "g";
+                const re = compileRegex(r.pattern, flags);
+                if (!re) {
                   return (
                     <span
                       key={r.id}
@@ -229,6 +218,25 @@ export function RegexManager({ onBack }: { onBack?: (() => void) | undefined }) 
                     </span>
                   );
                 }
+                // 非全局规则 String.replace 只替换第一处，计数也按 1 算（与实际行为一致）
+                const hits = flags.includes("g")
+                  ? (preview.match(re) || []).length
+                  : re.test(preview)
+                    ? 1
+                    : 0;
+                return (
+                  <span
+                    key={r.id}
+                    className={`text-[9px] px-1.5 py-px rounded-full ${
+                      hits > 0
+                        ? "bg-emerald-500/15 text-emerald-500"
+                        : "bg-muted text-muted-foreground/60"
+                    }`}
+                    title={r.pattern}
+                  >
+                    {r.name} ×{hits}
+                  </span>
+                );
               })}
           </div>
         )}

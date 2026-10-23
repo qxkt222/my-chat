@@ -6,6 +6,7 @@
 
 import type { CharacterCard, CharacterBook, Persona, PromptPreset, Message } from "@/types";
 import { assembleRoster } from "./preset-roster";
+import { compileRegex } from "./regex-cache";
 
 export interface RpContext {
   card: CharacterCard;
@@ -59,11 +60,11 @@ function entryMatches(
     return keys.some((k) => {
       const t = k.trim();
       if (!t) return false;
-      try {
-        return new RegExp(t, caseSensitive ? "" : "i").test(text);
-      } catch {
-        return literalMatch(t, text, caseSensitive, wholeWords);
-      }
+      // 编译走共享缓存（SRC-14）：世界书条目 × 关键词在每轮扫描里会被反复请求
+      const re = compileRegex(t, caseSensitive ? "" : "i");
+      // compileRegex 对坏/超长正则返回 null（不抛）—— 与原 catch 的回退语义一致
+      if (!re) return literalMatch(t, text, caseSensitive, wholeWords);
+      return re.test(text);
     });
   }
   return keys.some((k) => {

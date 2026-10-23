@@ -81,7 +81,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   const compareList = models.filter(
     (m) => m.name !== activeModel && compareModels.includes(m.name)
   );
-  const ph = model ? `Message ${model.name}... (Enter to send)` : t("chat.noModel");
+  const ph = model ? t("chat.placeholderModel", { model: model.name }) : t("chat.noModel");
 
   // 代码块「插入到输入框」:MessageRenderer 通过模块级 handler 回调(保持渲染器纯组件)
   useEffect(() => {
@@ -572,7 +572,9 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
                 >
                   <div className="font-medium text-foreground">{c.name}</div>
                   <div className="text-[10px] text-muted-foreground truncate">{c.description}</div>
-                  <div className="text-[9px] text-primary mt-0.5">{c.steps.length} 步</div>
+                  <div className="text-[9px] text-primary mt-0.5">
+                    {t("chat.chainSteps", { n: c.steps.length })}
+                  </div>
                 </button>
               ))}
             </div>
@@ -652,7 +654,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
             <button
               onClick={() => cancelGeneration()}
               className="p-2 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-              title="Stop (Esc)"
+              title={t("chat.stopTitle")}
             >
               <Square className="w-4 h-4" />
             </button>
@@ -728,7 +730,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
                 onClick={regenerate}
                 disabled={!model}
                 className="p-2 rounded-md border border-input bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
-                title="Regenerate"
+                title={t("chat.regenerate")}
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
@@ -736,7 +738,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
                 onClick={handleSend}
                 disabled={!input.trim() || !model}
                 className="p-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
-                title="Send (Enter)"
+                title={t("chat.sendTitle")}
               >
                 <Send className="w-4 h-4" />
               </button>
@@ -786,7 +788,11 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
                   : "border-input bg-background text-muted-foreground hover:text-foreground"
               }`}
             >
-              {m === "hybrid" ? t("chat.ragModeHybrid") : m === "bm25" ? "BM25" : "向量"}
+              {m === "hybrid"
+                ? t("chat.ragModeHybrid")
+                : m === "bm25"
+                  ? "BM25"
+                  : t("chat.ragModeVector")}
             </button>
           ))}
           <label

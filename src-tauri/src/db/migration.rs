@@ -20,6 +20,7 @@
 
 use super::{key, scan_prefix};
 use sled::Db;
+use std::path::Path;
 
 /// 迁移函数签名:把版本 v 升级到 v+1(幂等,内部 flush)
 pub type MigrationFn = fn(&Db) -> Result<(), String>;
@@ -129,11 +130,70 @@ pub fn run_pending_migration_rollback() -> Result<(), String> {
         let _ = std::fs::remove_file(&marker);
         return Err(format!("迁移快照不存在,已取消回滚: {}", snap.display()));
     }
-    // 清空当前 sled_db 目录再拷快照回来(避免残留文件)
     let dest = super::app_db_path();
-    let _ = std::fs::remove_dir_all(&dest);
-    crate::commands::backup::copy_dir_all(&snap, &dest)?;
+    let staging = dest.with_file_name(format!(
+        "sled_db.rollback-staging-{}-{}",
+        unix_secs(),
+        std::process::id()
+    ));
+    // 关键(RS-19):旧实现先 remove_dir_all 再 copy —— 中途失败(断电/磁盘满/
+    // 文件被占用)会把唯一的原库连同半份新库一起留下,数据全毁。改为:
+    //   快照 → 临时目录(原库不动) → rename 原库到备份名 → rename 临时目录就位
+    // 任何一步失败都保留/恢复原库。
+    swap_in_snapshot(&snap, &dest, &staging, |src, dst| {
+        crate::commands::backup::copy_dir_all(src, dst)
+    })?;
     let _ = std::fs::remove_file(&marker);
+    Ok(())
+}
+
+/// 回滚的原子交换核心(可注入 copy,便于测试中途失败)。
+///
+/// 前置:`snap` 是完整快照目录。步骤:
+/// 1. `copy(snap, staging)` —— 只动临时目录,原库不变;失败则清临时目录返回 Err。
+/// 2. 原 `dest` rename 到唯一备份名(同卷,原子)。
+/// 3. `staging` rename 到 `dest`;失败则把备份 rename 回 `dest` 后返回 Err。
+/// 4. 删除备份。
+///
+/// 返回 Err 时保证 `dest` 仍是调用前的原库(或根本不存在)。
+fn swap_in_snapshot<F>(snap: &Path, dest: &Path, staging: &Path, copy: F) -> Result<(), String>
+where
+    F: Fn(&Path, &Path) -> Result<(), String>,
+{
+    // 清理上次失败残留的临时目录(只清理本函数命名空间内的路径)
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).map_err(|e| format!("清理回滚临时目录失败: {e}"))?;
+    }
+    if let Err(e) = copy(snap, staging) {
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(format!("回滚快照拷贝失败,原库未改动: {e}"));
+    }
+
+    let backup = dest.with_file_name(format!(
+        "{}.rollback-old-{}-{}",
+        dest.file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().to_string()),
+        unix_secs(),
+        std::process::id()
+    ));
+    let had_dest = dest.exists();
+    if had_dest {
+        if let Err(e) = std::fs::rename(dest, &backup) {
+            let _ = std::fs::remove_dir_all(staging);
+            return Err(format!("回滚时挪开原库失败(原库未改动): {e}"));
+        }
+    }
+    if let Err(e) = std::fs::rename(staging, dest) {
+        // 恢复原库:把备份 rename 回去
+        if had_dest {
+            let _ = std::fs::rename(&backup, dest);
+        }
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(format!("回滚交换失败,已恢复原库: {e}"));
+    }
+    if had_dest {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
     Ok(())
 }
 
@@ -156,8 +216,35 @@ pub fn preflight_snapshot() -> Result<(), String> {
 /// 迁移失败返回 Err 并保留回滚 marker(下次启动 rollback 后重试)。
 pub fn run_migrations() -> Result<(), String> {
     let db = super::db()?;
+    if let Err(e) = migrate_db(db) {
+        // 除返回值外再落一份文件:setup 的错误最终只会变成启动失败,
+        // 用户看不到 stderr;migration_error.log 至少能在排障时读到原因。
+        let _ = std::fs::write(app_data_dir().join("migration_error.log"), format!("{e}\n"));
+        return Err(e);
+    }
+    let _ = db.flush();
+    clear_migration_marker();
+    // 双版本同步:文件侧版本写为 LATEST(下次启动 preflight 跳过快照)
+    write_file_version(SCHEMA_VERSION_LATEST);
+    Ok(())
+}
+
+/// 迁移核心(可单测):读版本 → 检查 → 顺序执行迁移 → 写回版本。
+///
+/// RS-19:库版本**高于**本程序支持的最新版本时直接 Err。旧实现
+/// `if from >= LATEST { return Ok(()) }` 会让旧版程序照常打开新版库、
+/// 继续读写成"看似正常"的状态,直到某次写入把新字段/新结构破坏。
+/// 现在启动即失败(main.rs setup 返回 Err,应用不进入主界面),错误信息
+/// 明确告知"数据由更新版本创建"。
+fn migrate_db(db: &Db) -> Result<(), String> {
     let from = current_version(db);
-    if from >= SCHEMA_VERSION_LATEST {
+    if from > SCHEMA_VERSION_LATEST {
+        return Err(format!(
+            "数据库 schema 版本为 {from},高于本程序支持的最新版本 {SCHEMA_VERSION_LATEST};\
+             数据可能由更新版本的 my-chat 创建。请升级程序后再打开(已停止迁移与读写,避免损坏数据)。"
+        ));
+    }
+    if from == SCHEMA_VERSION_LATEST {
         return Ok(());
     }
     let mut v = from;
@@ -169,10 +256,6 @@ pub fn run_migrations() -> Result<(), String> {
             write_version(db, v)?;
         }
     }
-    let _ = db.flush();
-    clear_migration_marker();
-    // 双版本同步:文件侧版本写为 LATEST(下次启动 preflight 跳过快照)
-    write_file_version(SCHEMA_VERSION_LATEST);
     Ok(())
 }
 
@@ -266,6 +349,109 @@ mod tests {
         let db = temp_db();
         write_version(&db, 3).unwrap();
         assert_eq!(current_version(&db), 3);
+    }
+
+    // ── RS-19: 版本高于最新必须拒绝 ───────────────────────
+
+    #[test]
+    fn newer_schema_is_rejected() {
+        let db = temp_db();
+        write_version(&db, SCHEMA_VERSION_LATEST + 1).unwrap();
+        let err = migrate_db(&db).expect_err("库版本高于最新时必须拒绝");
+        assert!(
+            err.contains("更新版本"),
+            "错误信息应说明数据由更新版本创建: {err}"
+        );
+        assert!(
+            err.contains(&(SCHEMA_VERSION_LATEST + 1).to_string()),
+            "错误信息应带上实际版本号: {err}"
+        );
+        // 拒绝时不得改写版本号
+        assert_eq!(current_version(&db), SCHEMA_VERSION_LATEST + 1);
+    }
+
+    #[test]
+    fn latest_schema_is_noop() {
+        let db = temp_db();
+        write_version(&db, SCHEMA_VERSION_LATEST).unwrap();
+        assert!(migrate_db(&db).is_ok(), "已是新版应当直接通过");
+        assert_eq!(current_version(&db), SCHEMA_VERSION_LATEST);
+    }
+
+    // ── RS-19: 回滚中途失败不得损坏原库 ───────────────────
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mychat-test-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// 注入"拷到一半失败":staging 里有半成品,但原库必须毫发无损。
+    #[test]
+    fn rollback_copy_failure_keeps_original_db() {
+        let root = temp_dir("rollback-fail");
+        let snap = root.join("snapshot");
+        let dest = root.join("sled_db");
+        let staging = root.join("sled_db.rollback-staging");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("snap.txt"), b"new").unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("original.txt"), b"keep-me").unwrap();
+
+        let err = swap_in_snapshot(&snap, &dest, &staging, |_src, dst| {
+            std::fs::create_dir_all(dst).unwrap();
+            std::fs::write(dst.join("half.txt"), b"partial").unwrap();
+            Err("injected copy failure".to_string())
+        })
+        .expect_err("注入的拷贝失败必须向上传递");
+        assert!(err.contains("injected"), "{err}");
+
+        // 原库原样保留,半成品不得混入
+        assert_eq!(
+            std::fs::read(dest.join("original.txt")).unwrap(),
+            b"keep-me"
+        );
+        assert!(!dest.join("half.txt").exists(), "半成品不得落进原库");
+        assert!(!staging.exists(), "临时目录应被清理");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 正常路径:快照完整替换原库。
+    #[test]
+    fn rollback_success_swaps_in_snapshot() {
+        let root = temp_dir("rollback-ok");
+        let snap = root.join("snapshot");
+        let dest = root.join("sled_db");
+        let staging = root.join("sled_db.rollback-staging");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("snap.txt"), b"new").unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("original.txt"), b"old").unwrap();
+
+        swap_in_snapshot(
+            &snap,
+            &dest,
+            &staging,
+            crate::commands::backup::copy_dir_all,
+        )
+        .expect("回滚应当成功");
+
+        assert!(dest.join("snap.txt").exists(), "快照内容应就位");
+        assert!(
+            !dest.join("original.txt").exists(),
+            "旧库内容不应残留(回滚是替换语义)"
+        );
+        assert!(!staging.exists(), "临时目录应被清理");
+        // 唯一备份名目录也不应残留
+        let leftovers = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("rollback-old"))
+            .count();
+        assert_eq!(leftovers, 0, "备份目录应被删除");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

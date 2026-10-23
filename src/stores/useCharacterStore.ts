@@ -16,10 +16,17 @@ import {
   writeFileBytes,
   dbGetSetting,
   dbSaveSetting,
+  logDiag,
 } from "@/lib/tauri";
 import { parseCharacterJson, toExportJson, buildExportPng } from "@/lib/character-card";
 import { parseTavernPresets } from "@/lib/preset-import";
 import { parseLorebook } from "@/lib/lorebook-import";
+import {
+  sanitizeCharacterBook,
+  sanitizeCharacterCard,
+  sanitizePersonas,
+  sanitizeStringArray,
+} from "@/lib/persist-sanitize";
 import {
   applyOrder,
   emptyRosterIndex,
@@ -178,7 +185,10 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
         if (!f.endsWith(".json")) continue;
         try {
           const raw = await readFile(`${appDir}/characters/${f}`);
-          characters.push(JSON.parse(raw) as CharacterCard);
+          // 运行时校验：旧版本/手改文件缺字段时补默认值，坏字段丢弃而不是带到渲染层
+          const card = sanitizeCharacterCard(JSON.parse(raw));
+          if (card.id) characters.push(card);
+          else logDiag(`character file has no usable id: ${f}`);
         } catch {
           /* 坏文件跳过 */
         }
@@ -279,12 +289,8 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       let activePersonaId = "";
       try {
         const raw = await dbGetSetting("personas");
-        if (raw) {
-          personas = (JSON.parse(raw) as Persona[]).map((p) => ({
-            ...p,
-            lorebookIds: p.lorebookIds || (p.lorebookId ? [p.lorebookId] : []),
-          }));
-        }
+        // 逐字段校验 + 旧单值 lorebookId → 数组迁移（在 sanitizer 内完成）
+        if (raw) personas = sanitizePersonas(JSON.parse(raw));
         const act = await dbGetSetting("active_persona_id");
         activePersonaId = act || "";
         if (activePersonaId && !personas.some((p) => p.id === activePersonaId))
@@ -297,7 +303,7 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       const lorebooks: Record<string, CharacterBook> = {};
       try {
         const raw = await readFile(`${appDir}/lorebook.json`);
-        globalLorebook = JSON.parse(raw) as CharacterBook;
+        globalLorebook = sanitizeCharacterBook(JSON.parse(raw));
       } catch {
         /* 首次无文件 */
       }
@@ -307,7 +313,7 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
         try {
           const id = f.replace(/\.json$/, "");
           const raw = await readFile(`${appDir}/lorebooks/${f}`);
-          lorebooks[id] = JSON.parse(raw) as CharacterBook;
+          lorebooks[id] = sanitizeCharacterBook(JSON.parse(raw));
         } catch {
           /* skip */
         }
@@ -316,7 +322,7 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       let enabledLorebookIds: string[] = [];
       try {
         const raw = await dbGetSetting("enabled_lorebooks");
-        if (raw) enabledLorebookIds = JSON.parse(raw) as string[];
+        if (raw) enabledLorebookIds = sanitizeStringArray(JSON.parse(raw));
       } catch {
         /* ignore */
       }

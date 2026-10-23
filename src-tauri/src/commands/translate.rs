@@ -24,14 +24,11 @@ pub async fn translate_text(
     }
 }
 
-/// 构造 HTTP `客户端;proxy_url` 非空时走代理(国内访问 Google 必需,如 <http://127.0.0.1:7890>)
+/// 构造 HTTP 客户端;`proxy_url` 非空时走代理(国内访问 Google 必需,
+/// 如 <http://127.0.0.1:7890>)。统一走 `net` 模块,继承 10s 建连 / 120s 总超时 /
+/// 不跟随重定向的策略(RS-07)。
 fn build_client(proxy_url: &str) -> Result<Client, String> {
-    let mut b = Client::builder();
-    let p = proxy_url.trim();
-    if !p.is_empty() {
-        b = b.proxy(reqwest::Proxy::all(p).map_err(|e| format!("代理配置错误: {e}"))?);
-    }
-    b.build().map_err(|e| format!("客户端创建失败: {e}"))
+    crate::net::client_with_proxy(proxy_url)
 }
 
 /// 长文本分块(单请求过长会失败):按段落聚合,每块 ≤ `CHUNK_MAX` 字符

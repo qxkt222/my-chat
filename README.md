@@ -25,7 +25,7 @@
 ### 后端(Rust)
 
 `tauri 2.11.5` · `tokio 1.53.0` · `reqwest 0.12.28` · `sled 0.34.7` ·
-`pdf-extract 0.7` · `zip 2` · Windows 下用 DPAPI 加密 API key
+`pdf-extract 0.12.1` · `zip 2` · Windows 下用 DPAPI 加密 API key
 
 ---
 
@@ -43,15 +43,19 @@ Windows 上也可直接双击 `启动.bat`。
 
 ### 闸门脚本(审查期新增)
 
-`scripts/gate.mjs` 是统一的验证入口,并附带一组**行为型断言闸门**:
+`scripts/gate.mjs` 是统一的验证入口,**共 18 个条目**(`all` 为汇总入口,实际闸门 17 道):
 
-```bash
-node scripts/gate.mjs build          # = npm run build
-node scripts/gate.mjs assert-git     # 版本控制基线(local HEAD == remote main、无巨物入库)
-node scripts/gate.mjs assert-tests   # 0 失败且通过数不低于基线
-node scripts/gate.mjs assert-lint    # 0 错误且告警不超基线
-node scripts/gate.mjs assert-build   # 构建产物真实可用(被引用 assets 均存在)
-```
+| 类别 | 闸门 |
+|---|---|
+| 静态 / 构建(7) | `typecheck` `lint` `format` `rustfmt` `test` `coverage` `build` |
+| Rust(3) | `rust-check` `rust-test` `rust-clippy`(带 `-- -D warnings`)|
+| 行为型断言(7) | `assert-git` `assert-tests` `assert-lint` `assert-format` `assert-rustfmt` `assert-coverage` `assert-build` |
+| 汇总(1) | `all`(typecheck → lint → format → rustfmt → test → coverage → build)|
+
+几条关键判据:用例**通过数 ≥ 180** 且**跳过数 ≤ 5**;lint 0 错误 0 告警;
+prettier / rustfmt 0 diff;覆盖率按 `vite.config.ts` 的 `thresholds` 兜底;
+`assert-coverage` 解析 vitest 控制台 `All files` 行(不读 `coverage-summary.json`)。
+**完整清单与基线值以脚本内 `GATES` / `BASELINE` 为准**。
 
 **为什么需要它**:本机执行环境里的 `npm` / `npx` 被解析到一个损坏的 shim
 (该 Node runtime 的 `node_modules/` 只有 `pnpm`,根本没有 `npm` 包,那几条 shim 是残留物),
@@ -67,11 +71,16 @@ node scripts/gate.mjs assert-build   # 构建产物真实可用(被引用 assets
 | 错误日志 | `%APPDATA%\com.my-chat\chat_errors.log` |
 | 启动标记 | `%APPDATA%\com.my-chat\startup.marker` |
 | 角色卡 | `%APPDATA%\com.my-chat\characters\`(含 `avatars\`) |
+| 预设 | `%APPDATA%\com.my-chat\presets\` |
 | 酒馆会话 | `%APPDATA%\com.my-chat\tavern\{id}.json` |
 | 推演会话 | `%APPDATA%\com.my-chat\simulation\{id}.json` |
+| 生成的图片 | `%APPDATA%\com.my-chat\generated\` |
 | 工作模式会话 | sled 库(与酒馆/推演目录完全隔离) |
 
-API key 经 Windows DPAPI 加密存储,密文带 `ENC:` 前缀,明文旧数据启动时自动迁移。
+敏感设置(API key / token / 密码 / `connection_profiles`)经 Windows DPAPI 加密后存储,
+密文带 `ENC:` 前缀。旧版本留下的明文记录**不会在启动时批量迁移**,而是在**首次读取该键时**
+惰性重写为密文(`db/settings.rs` 的 `migrate_plaintext_sensitive`)。
+加密失败直接返回错误,不回落明文。
 
 ---
 

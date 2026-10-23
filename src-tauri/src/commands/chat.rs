@@ -3,6 +3,10 @@
 
 use crate::adapters::engine::build_api_url;
 use crate::adapters::sse_parser::{parse_sse_chunk, AdapterConfig};
+use crate::net::{
+    SseLineBuffer, FIRST_BYTE_TIMEOUT, FIRST_BYTE_TIMEOUT_MESSAGE, STREAM_IDLE_TIMEOUT,
+    STREAM_TIMEOUT_MESSAGE,
+};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,6 +58,15 @@ fn is_cancelled(request_id: &str) -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains_key(request_id)
+}
+
+/// 请求结束（成功 / 失败 / 超时 / 用户取消）后清掉取消标记。
+/// 只插不删会让错误路径留下幽灵条目：同 id 的后续请求一进来就被误判为已取消。
+fn clear_cancelled(request_id: &str) {
+    CANCELLED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(request_id);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -165,7 +178,11 @@ pub struct ChatRequest {
 
 #[tauri::command]
 pub async fn stream_chat(app: AppHandle, request: ChatRequest) -> Result<(), String> {
-    match stream_chat_inner(&app, &request).await {
+    let result = stream_chat_inner(&app, &request).await;
+    // 无论成功、失败、超时还是用户取消，这个请求都已经结束：清掉取消标记。
+    // 否则错误路径会在 CANCELLED 里留下幽灵条目（同 id 请求会被误判为已取消）。
+    clear_cancelled(&request.request_id);
+    match result {
         Ok(()) => Ok(()),
         Err(e) => {
             // Always record the failure (incl. the actual URL) so it can be
@@ -328,15 +345,18 @@ async fn stream_chat_inner(app: &AppHandle, request: &ChatRequest) -> Result<(),
         }
     }
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request error: {e}"))?;
+    let client = crate::net::streaming_client();
+    // 流式客户端没有总超时：若服务端接受连接后永不返回响应头，
+    // `send()` 会一直挂着。等待响应头也属于首字节阶段，同样受 180s 保护。
+    let resp = await_headers(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send(),
+    )
+    .await?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -348,57 +368,160 @@ async fn stream_chat_inner(app: &AppHandle, request: &ChatRequest) -> Result<(),
     let adapter = AdapterConfig::openai_compatible();
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    // RS-10：按字节缓冲，只在凑齐完整行时解码 —— 跨分片的中文不会再变成 `�`。
+    let mut lines = SseLineBuffer::new();
     // DeepSeek prompt-cache telemetry: last chunk carries usage; track it so the
     // frontend can display the cache hit rate.
     let mut cache_hit: u64 = 0;
     let mut cache_miss: u64 = 0;
 
-    while let Some(chunk) = stream.next().await {
-        // Honour cancellation for this specific request (user pressed Stop)
+    // 首片与后续片的容忍度不同：模型冷启动/排队时首字节可能很慢（180s），
+    // 但一旦开始吐字，超过 60s 没有新数据就应判定为卡死。
+    let mut first_chunk = true;
+    loop {
+        // Honour cancellation for this specific request (user pressed Stop).
+        // 每个等待周期检查一次：端点挂起时由下面的超时兜底，
+        // 不会再出现"停止无效、请求永远挂着"（RS-07）。
         if is_cancelled(request_id) {
             break;
         }
-        let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
-
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer = buffer[pos + 1..].to_string();
-
-            if line.is_empty() || line.starts_with(':') {
-                continue;
+        let (wait, timeout_msg) = stream_chunk_timeout(first_chunk);
+        let chunk = match tokio::time::timeout(wait, stream.next()).await {
+            Ok(Some(chunk)) => {
+                first_chunk = false;
+                chunk.map_err(|e| format!("Stream error: {e}"))?
             }
-
-            // Track cache usage (present in the final chunk)
-            if let Some((hit, miss)) = extract_usage(&line) {
-                cache_hit = hit;
-                cache_miss = miss;
+            Ok(None) => break,
+            Err(_) => return Err(timeout_msg.to_string()),
+        };
+        for line in lines.push(&chunk) {
+            if handle_openai_line(
+                app,
+                request_id,
+                &adapter,
+                &line,
+                &mut cache_hit,
+                &mut cache_miss,
+            ) {
+                emit_done_with_cache(app, request_id, cache_hit, cache_miss);
+                return Ok(());
             }
+        }
+    }
 
-            if let Some((content, done)) = parse_sse_chunk(&adapter, &line) {
-                // Reasoning models (e.g. DeepSeek v4) stream their thinking in
-                // delta.reasoning_content — surface it so the UI can show it.
-                let reasoning = extract_reasoning(&line);
-                let _ = app.emit(
-                    "chat-stream",
-                    serde_json::json!({
-                        "request_id": request_id, "done": done,
-                        "content": content, "reasoning": reasoning
-                    }),
-                );
-                if done {
-                    emit_done_with_cache(app, request_id, cache_hit, cache_miss);
-                    return Ok(());
-                }
-            }
+    // 流结束时 flush 末尾没有换行的残行（部分服务端最后一行不带 \n）。
+    if let Some(line) = lines.flush() {
+        if handle_openai_line(
+            app,
+            request_id,
+            &adapter,
+            &line,
+            &mut cache_hit,
+            &mut cache_miss,
+        ) {
+            emit_done_with_cache(app, request_id, cache_hit, cache_miss);
+            return Ok(());
         }
     }
 
     emit_done_with_cache(app, request_id, cache_hit, cache_miss);
 
     Ok(())
+}
+
+/// 选择本次 `stream.next()` 的等待上限与对应错误文案。
+///
+/// - 首片：`FIRST_BYTE_TIMEOUT`（180s），对应"首字节超时"；
+/// - 后续：`STREAM_IDLE_TIMEOUT`（60s），对应"响应超时（无数据）"。
+fn stream_chunk_timeout(first_chunk: bool) -> (Duration, &'static str) {
+    if first_chunk {
+        (FIRST_BYTE_TIMEOUT, FIRST_BYTE_TIMEOUT_MESSAGE)
+    } else {
+        (STREAM_IDLE_TIMEOUT, STREAM_TIMEOUT_MESSAGE)
+    }
+}
+
+/// 等待响应头（`send()`），超时计入首字节阶段。
+///
+/// `streaming_client()` 刻意没有总超时（长回答不能被一刀切断），但这也意味着
+/// "连上了却不回响应头"会永久挂起。这里只包住等头阶段：进入 body 之后由
+/// 逐片超时（首片 180s / 后续 60s）接管。
+async fn await_headers<F, T, E>(fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    await_headers_with_timeout(FIRST_BYTE_TIMEOUT, fut).await
+}
+
+/// `await_headers` 的可注入超时版本：单测用毫秒级超时，避免真等 180s。
+async fn await_headers_with_timeout<F, T, E>(wait: Duration, fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(wait, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(format!("Request error: {e}")),
+        Err(_) => Err(FIRST_BYTE_TIMEOUT_MESSAGE.to_string()),
+    }
+}
+
+/// 处理一条 `OpenAI` 兼容 SSE 行；返回 `true` 表示收到 done。
+fn handle_openai_line(
+    app: &AppHandle,
+    request_id: &str,
+    adapter: &AdapterConfig,
+    line: &str,
+    cache_hit: &mut u64,
+    cache_miss: &mut u64,
+) -> bool {
+    if line.is_empty() || line.starts_with(':') {
+        return false;
+    }
+
+    // Track cache usage (present in the final chunk)
+    if let Some((hit, miss)) = extract_usage(line) {
+        *cache_hit = hit;
+        *cache_miss = miss;
+    }
+
+    if let Some((content, done)) = parse_sse_chunk(adapter, line) {
+        // Reasoning models (e.g. DeepSeek v4) stream their thinking in
+        // delta.reasoning_content — surface it so the UI can show it.
+        let reasoning = extract_reasoning(line);
+        let _ = app.emit(
+            "chat-stream",
+            serde_json::json!({
+                "request_id": request_id, "done": done,
+                "content": content, "reasoning": reasoning
+            }),
+        );
+        return done;
+    }
+    false
+}
+
+/// 处理一条模板 SSE 行；返回 `true` 表示收到 done。
+fn handle_template_line(
+    app: &AppHandle,
+    request_id: &str,
+    adapter: &AdapterConfig,
+    line: &str,
+) -> bool {
+    if line.is_empty() || line.starts_with(':') {
+        return false;
+    }
+    if let Some((content, done)) = parse_sse_chunk(adapter, line) {
+        let _ = app.emit(
+            "chat-stream",
+            serde_json::json!({
+                "request_id": request_id, "done": done, "content": content, "reasoning": ""
+            }),
+        );
+        return done;
+    }
+    false
 }
 
 /// Stream via a custom API template: build the request from
@@ -459,7 +582,12 @@ async fn stream_via_template(
         reqwest::Method::POST
     };
 
-    let client = reqwest::Client::new();
+    // SSE 用无总超时的流式客户端；普通 JSON 响应用带 120s 总超时的客户端。
+    let client = if tpl.sse_enabled {
+        crate::net::streaming_client()
+    } else {
+        crate::net::client()
+    };
     let mut req = client.request(method.clone(), &url);
     for (k, v) in &tpl.request_headers {
         req = req.header(k, v.replace("{{api_key}}", &api_key));
@@ -473,10 +601,15 @@ async fn stream_via_template(
         req = req.body(body);
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Request error: {e}"))?;
+    let resp = if tpl.sse_enabled {
+        // 与主路径一致：SSE 客户端无总超时，等响应头也纳入首字节 180s。
+        await_headers(req.send()).await?
+    } else {
+        // 非流式仍由 `client()` 的 120s 总超时兜底。
+        req.send()
+            .await
+            .map_err(|e| format!("Request error: {e}"))?
+    };
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
@@ -493,27 +626,33 @@ async fn stream_via_template(
             path,
         );
         let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        while let Some(chunk) = stream.next().await {
+        // RS-10：模板路径同样按完整行解码，避免中文跨分片被切碎。
+        let mut lines = SseLineBuffer::new();
+        // 与主路径一致：首片 180s，后续每片 60s。
+        let mut first_chunk = true;
+        loop {
             if is_cancelled(request_id) {
                 break;
             }
-            let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
-                if line.is_empty() || line.starts_with(':') {
-                    continue;
+            let (wait, timeout_msg) = stream_chunk_timeout(first_chunk);
+            let chunk = match tokio::time::timeout(wait, stream.next()).await {
+                Ok(Some(chunk)) => {
+                    first_chunk = false;
+                    chunk.map_err(|e| format!("Stream error: {e}"))?
                 }
-                if let Some((content, done)) = parse_sse_chunk(&adapter, &line) {
-                    let _ = app.emit("chat-stream", serde_json::json!({
-                        "request_id": request_id, "done": done, "content": content, "reasoning": ""
-                    }));
-                    if done {
-                        return Ok(());
-                    }
+                Ok(None) => break,
+                Err(_) => return Err(timeout_msg.to_string()),
+            };
+            for line in lines.push(&chunk) {
+                if handle_template_line(app, request_id, &adapter, &line) {
+                    return Ok(());
                 }
+            }
+        }
+        // 流结束：flush 末尾无换行的残行
+        if let Some(line) = lines.flush() {
+            if handle_template_line(app, request_id, &adapter, &line) {
+                return Ok(());
             }
         }
     } else {
@@ -713,6 +852,9 @@ pub(crate) fn log_chat_error(msg: &str) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
+    // RS-23：消息里可能带用户可控内容（路径、URL、模型输出）。不转义换行的话
+    // 一条消息就能伪造出多行日志（含伪造时间戳），污染排障结论。
+    let msg = escape_log_line(msg);
     let line = format!("[{ts}] {msg}\n");
 
     let mut targets: Vec<std::path::PathBuf> = Vec::new();
@@ -737,6 +879,11 @@ pub(crate) fn log_chat_error(msg: &str) {
             let _ = f.write_all(line.as_bytes());
         }
     }
+}
+
+/// 日志行转义：CR/LF 变成字面量 `\r` / `\n`，确保一条消息只占一行。
+fn escape_log_line(msg: &str) -> String {
+    msg.replace('\r', "\\r").replace('\n', "\\n")
 }
 
 #[cfg(test)]
@@ -800,5 +947,75 @@ mod clip_tests {
         assert!(out.len() < long.len(), "超长文本应被截断");
         assert!(out.contains("已截断"), "应标注已截断");
         assert!(out.starts_with('错'), "按字符边界截，不应切碎中文");
+    }
+}
+
+#[cfg(test)]
+mod stream_timeout_selection_tests {
+    use super::{await_headers_with_timeout, stream_chunk_timeout};
+    use crate::net::{
+        FIRST_BYTE_TIMEOUT, FIRST_BYTE_TIMEOUT_MESSAGE, STREAM_IDLE_TIMEOUT, STREAM_TIMEOUT_MESSAGE,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn first_chunk_gets_180s_and_first_byte_wording() {
+        let (wait, msg) = stream_chunk_timeout(true);
+        assert_eq!(wait, FIRST_BYTE_TIMEOUT, "首片必须等 180 秒");
+        assert_eq!(msg, FIRST_BYTE_TIMEOUT_MESSAGE);
+        assert!(msg.contains("首字节"), "首片超时文案要说明是首字节: {msg}");
+        assert!(msg.contains("180"), "文案要带 180 秒: {msg}");
+    }
+
+    #[test]
+    fn subsequent_chunks_get_60s_and_idle_wording() {
+        let (wait, msg) = stream_chunk_timeout(false);
+        assert_eq!(wait, STREAM_IDLE_TIMEOUT, "后续片必须等 60 秒");
+        assert_eq!(msg, STREAM_TIMEOUT_MESSAGE);
+        assert!(msg.contains("响应超时"), "后续超时文案应是响应超时: {msg}");
+        assert!(msg.contains("60"), "文案要带 60 秒: {msg}");
+    }
+
+    #[tokio::test]
+    async fn header_wait_times_out_with_first_byte_message() {
+        // 服务端接受连接却永不返回响应头：等待必须有上限，不能永久挂起。
+        let err = await_headers_with_timeout(
+            Duration::from_millis(20),
+            std::future::pending::<Result<(), std::io::Error>>(),
+        )
+        .await
+        .expect_err("永久 pending 的响应头等待必须超时");
+        assert_eq!(err, FIRST_BYTE_TIMEOUT_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn header_wait_passes_value_and_maps_transport_error() {
+        let ok = await_headers_with_timeout(Duration::from_secs(5), async {
+            Ok::<u8, std::io::Error>(7)
+        })
+        .await
+        .expect("立即完成的响应头等待不应超时");
+        assert_eq!(ok, 7);
+
+        let err = await_headers_with_timeout(Duration::from_secs(5), async {
+            Err::<u8, std::io::Error>(std::io::Error::other("boom"))
+        })
+        .await
+        .expect_err("传输错误应向上返回");
+        assert!(err.contains("Request error: boom"), "错误文案: {err}");
+    }
+}
+
+#[cfg(test)]
+mod log_escape_tests {
+    use super::escape_log_line;
+
+    #[test]
+    fn escape_log_line_prevents_log_injection() {
+        // 换行必须被转义，否则一条消息可以伪造出多行日志（含假时间戳）
+        assert_eq!(escape_log_line("a\nb"), r"a\nb");
+        assert_eq!(escape_log_line("a\r\nb"), r"a\r\nb");
+        assert_eq!(escape_log_line("a\rb"), r"a\rb");
+        assert_eq!(escape_log_line("clean"), "clean");
     }
 }

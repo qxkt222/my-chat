@@ -15,6 +15,9 @@ pub fn pick_file(
         dlg = dlg.add_filter(name, &exts);
     }
     let path = dlg.pick_file().ok_or("已取消选择")?;
+    // 登记读令牌：后续 read_file / read_file_bytes / extract_document_text
+    // 只认这里返回过的路径（10 分钟有效）。
+    crate::register_read_token(&path);
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -22,7 +25,10 @@ pub fn pick_file(
 /// 图片（png/jpg/jpeg/webp/bmp）走本地 tesseract OCR。
 #[tauri::command]
 pub fn extract_document_text(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
+    // 读侧准入（RS-05）：对话框令牌或应用数据目录内，且 ≤ 50 MB。
+    let resolved = crate::resolve_readable_path(&path)?;
+    crate::check_read_size(&resolved, crate::MAX_READ_BYTES)?;
+    let p = resolved.as_path();
     let ext = p
         .extension()
         .and_then(|e| e.to_str())
@@ -34,7 +40,8 @@ pub fn extract_document_text(path: String) -> Result<String, String> {
         "txt" | "md" | "json" | "csv" | "log" => {
             std::fs::read_to_string(p).map_err(|e| format!("读取文件失败: {e}"))
         }
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => ocr_image(path),
+        // 复用已解析的路径，避免再走一次 token 查询
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" => run_ocr(p),
         _ => Err(format!("暂不支持的文件类型: .{ext}")),
     }
 }
@@ -113,6 +120,13 @@ fn extract_wt_text(xml: &str) -> String {
 /// tesseract 未安装时返回带安装指引的错误（仅图片导入受影响）。
 #[tauri::command]
 pub fn ocr_image(path: String) -> Result<String, String> {
+    // 与 extract_document_text 同一准入口径：tesseract 读的也是这个文件。
+    let resolved = crate::resolve_readable_path(&path)?;
+    crate::check_read_size(&resolved, crate::MAX_READ_BYTES)?;
+    run_ocr(&resolved)
+}
+
+fn run_ocr(path: &Path) -> Result<String, String> {
     if std::process::Command::new("tesseract")
         .arg("--version")
         .output()
@@ -123,7 +137,7 @@ pub fn ocr_image(path: String) -> Result<String, String> {
         );
     }
     let out = std::process::Command::new("tesseract")
-        .arg(&path)
+        .arg(path)
         .arg("stdout")
         .arg("-l")
         .arg("chi_sim")

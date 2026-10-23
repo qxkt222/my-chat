@@ -18,7 +18,20 @@ import {
   parseTimeLabel,
   parseTimelineLines,
 } from "@/lib/sim-prompt";
-import { budgetFor, shrinkMessages } from "@/lib/context-budget";
+import { budgetFor } from "@/lib/context-budget";
+import { prepareOutgoingMessages } from "@/lib/outgoing-regex";
+import { toModelConfig } from "@/lib/model-config";
+import { runSummarize, SUMMARIZE_THRESHOLD } from "@/lib/summarize";
+import { maybeWarnBudget } from "@/lib/budget-warning";
+import { createStreamBatcher, applyStreamDeltas } from "@/lib/stream-batcher";
+
+/** 流式 token 合帧(rAF):key = assistant 消息 id(审计 SRC-03) */
+const simStreamBatcher = createStreamBatcher<string>((batch) => {
+  useSimulationStore.setState((s) => {
+    const res = applyStreamDeltas<SimulationConversation, Message>(s.conversations, batch);
+    return res.changed ? { conversations: res.conversations } : s;
+  });
+});
 
 function uuid(): string {
   return crypto.randomUUID();
@@ -29,8 +42,6 @@ function nowISO(): string {
 
 /** 自动记忆(记忆卡,对齐酒馆 Summarize)开关持久化 */
 const AUTO_SUMMARIZE_KEY = "sim_auto_summarize";
-/** 自动摘要阈值:距上次摘要新增消息数 */
-const SUMMARIZE_THRESHOLD = 15;
 /** 惰性状态同步:距上次同步 N 次推演后自动刷一次 */
 const LAZY_SYNC_INTERVAL = 5;
 
@@ -98,6 +109,16 @@ interface SimulationState {
   getActive: () => SimulationConversation | undefined;
 }
 
+/**
+ * load() 幂等守卫(SRC-01),与 useTavernStore 同款。
+ *
+ * SimulationView 的 `useEffect(..., [sim])` 依赖整店对象,而 load() 无条件 set()
+ * 每次都会造新对象 → 挂载即无限读盘。这里保证:加载过(成功或失败)就不再重试;
+ * 并发调用(StrictMode 双挂载)共享同一次读盘。
+ * 依赖侧的修法见 SimulationView.tsx。
+ */
+let loadInFlight: Promise<void> | null = null;
+
 export const useSimulationStore = create<SimulationState>((set, get) => ({
   conversations: [],
   activeId: null,
@@ -109,24 +130,35 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   loaded: false,
 
   load: async () => {
-    try {
-      const appDir = await getAppDir();
-      const names = await listDir(`${appDir}/simulation`);
-      const convs: SimulationConversation[] = [];
-      for (const f of names) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const raw = await readFile(`${appDir}/simulation/${f}`);
-          const c = JSON.parse(raw) as SimulationConversation;
-          if (c.id) convs.push(c);
-        } catch {
-          /* 坏文件跳过 */
+    if (get().loaded) return;
+    if (loadInFlight) return loadInFlight;
+
+    loadInFlight = (async () => {
+      try {
+        const appDir = await getAppDir();
+        const names = await listDir(`${appDir}/simulation`);
+        const convs: SimulationConversation[] = [];
+        for (const f of names) {
+          if (!f.endsWith(".json")) continue;
+          try {
+            const raw = await readFile(`${appDir}/simulation/${f}`);
+            const c = JSON.parse(raw) as SimulationConversation;
+            if (c.id) convs.push(c);
+          } catch {
+            /* 坏文件跳过 */
+          }
         }
+        convs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+        set({ conversations: convs, loaded: true });
+      } catch {
+        set({ loaded: true });
       }
-      convs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      set({ conversations: convs, loaded: true });
-    } catch {
-      set({ loaded: true });
+    })();
+
+    try {
+      await loadInFlight;
+    } finally {
+      loadInFlight = null;
     }
   },
 
@@ -241,13 +273,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       await new Promise<void>((resolve) => {
         void streamChat(
           {
-            model_config: {
-              name: model.name,
-              provider: model.provider || "",
-              api_url: model.api_url,
-              api_key: model.api_key,
-              model: model.model,
-            },
+            model_config: toModelConfig(model),
             messages: [
               { role: "system", content: sys },
               { role: "user", content: transcript },
@@ -379,6 +405,8 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      // 收尾前落出挂起帧(finish 读 store 里的最终内容,且避免收尾后重复追加)
+      simStreamBatcher.flush();
       const cur = get().conversations.find((c) => c.id === conv.id);
       if (cur) {
         const msgs = cur.messages.map((m) =>
@@ -390,21 +418,20 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     };
 
     try {
-      // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const finalMessages = shrinkMessages(
-        apiMessages,
-        budgetFor(model, settingsStore.budgetConfig),
-        { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
-      ).messages;
+      // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要,
+      // 保缓存前缀) → 出站正则清理(placement=2,只作用于待发副本)
+      const budgetResult = prepareOutgoingMessages(apiMessages, {
+        budget: budgetFor(model, settingsStore.budgetConfig),
+        mode: settingsStore.budgetConfig.mode,
+        summary: conv.summary,
+        regexRules: settingsStore.regexRules,
+      });
+      // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+      maybeWarnBudget(conv.id, budgetResult.total, budgetResult.budget);
+      const finalMessages = budgetResult.messages;
       await streamChat(
         {
-          model_config: {
-            name: model.name,
-            provider: model.provider || "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
+          model_config: toModelConfig(model),
           messages: finalMessages,
           temperature: pick("temperature") ?? 0.7,
           max_tokens:
@@ -428,28 +455,10 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
         requestId,
         {
           onToken: (delta) => {
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, content: m.content + delta } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            simStreamBatcher.add(asmMsg.id, { content: delta });
           },
           onReasoning: (d) => {
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, reasoning: (m.reasoning || "") + d } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            simStreamBatcher.add(asmMsg.id, { reasoning: d });
           },
           onDone: () => {
             void finish().then(() => {
@@ -558,13 +567,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       await new Promise<void>((resolve) => {
         void streamChat(
           {
-            model_config: {
-              name: model.name,
-              provider: model.provider || "",
-              api_url: model.api_url,
-              api_key: model.api_key,
-              model: model.model,
-            },
+            model_config: toModelConfig(model),
             messages: [
               { role: "system", content: sys },
               { role: "user", content: transcript },
@@ -636,46 +639,18 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       ? "你是对话记忆管理员。下面是已有的对话摘要和新增对话。请把新增内容合并进摘要，保留关键事实、局势、人物关系、未决问题，输出一份精炼的中文摘要（500 字内），只输出摘要正文，不要任何前后缀。"
       : "你是对话记忆管理员。请把以下推演对话提炼成精炼的中文摘要（保留关键事实、世界局势、人物关系、未决事件），500 字内，只输出摘要正文。";
 
-    let acc = "";
-    try {
-      await new Promise<void>((resolve) => {
-        void streamChat(
-          {
-            model_config: {
-              name: model.name,
-              provider: model.provider || "",
-              api_url: model.api_url,
-              api_key: model.api_key,
-              model: model.model,
-            },
-            messages: [
-              { role: "system", content: sys },
-              {
-                role: "user",
-                content: conv.summary
-                  ? `【已有摘要】\n${conv.summary}\n\n【新增对话】\n${transcript}`
-                  : transcript,
-              },
-            ],
-            temperature: 0.3,
-            thinking_enabled: false,
-          },
-          uuid(),
-          {
-            onToken: (d) => {
-              acc += d;
-            },
-            onDone: () => resolve(),
-            onError: () => resolve(),
-          }
-        );
-      });
-      const summary = acc.trim();
-      if (summary) {
-        await get().patch(convId, { summary, summary_msg_count: conv.messages.length });
-      }
-    } catch {
-      /* 摘要失败静默 */
+    const result = await runSummarize({
+      model,
+      systemPrompt: sys,
+      userContent: conv.summary
+        ? `【已有摘要】\n${conv.summary}\n\n【新增对话】\n${transcript}`
+        : transcript,
+      label: "sim-summarize",
+    });
+    const summary = result.summary;
+    // 只有完整结束才落盘：中断时的半截摘要会覆盖掉上一份好摘要
+    if (result.complete && summary) {
+      await get().patch(convId, { summary, summary_msg_count: conv.messages.length });
     }
   },
 
@@ -684,6 +659,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     if (isStreaming && activeRequestId) {
       cancelChat(activeRequestId); // Rust 侧中止流
     }
+    simStreamBatcher.flush(); // 取消前落出已生成但未刷新的 token
     set({ isStreaming: false, activeRequestId: null, cancelRounds: true });
   },
 

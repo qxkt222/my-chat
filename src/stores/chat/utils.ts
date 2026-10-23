@@ -13,8 +13,8 @@ export function nowISO(): string {
   return new Date().toISOString();
 }
 
-/** 工作模式自动记忆(记忆卡):开关 + 阈值(距上次摘要新增消息数) */
+/** 工作模式自动记忆(记忆卡):开关。
+ *  阈值 SUMMARIZE_THRESHOLD 已统一到 lib/summarize.ts（三条链路共用一个数）。 */
 export const WORK_SUMMARIZE_KEY = "work_auto_summarize";
-export const WORK_SUMMARIZE_THRESHOLD = 15;
 /** 临时会话(免记忆):开关——开启时本次会话完全不读写记忆 */
 export const WORK_TEMP_MODE_KEY = "work_temp_mode";

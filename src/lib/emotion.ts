@@ -54,15 +54,28 @@ export function emotionImagePath(card: CharacterCard, emotionKey: string): strin
   return `${dir}/emotions/${card.id}/${emotionKey}.png`;
 }
 
-/** 表情图文件是否存在(异步,经 Rust 读文件判断磁盘存在;缺失时回退角色头像,避免破图) */
+/** 进程内存在性缓存:同一路径最多读一次整张 PNG(审计 SRC-04)。
+ *  结果有意不失效 —— 表情图缺失时回退角色头像,新增文件要重启才生效(可接受)。 */
+const existsCache = new Map<string, boolean>();
+
+/** 表情图文件是否存在(异步,经 Rust 读文件判断磁盘存在;缺失时回退角色头像,避免破图)。
+ *  同一路径的第二次调用直接命中内存缓存,不再触发 IPC/读盘。 */
 export async function emotionImageExists(path: string | null): Promise<boolean> {
   if (!path) return false;
+  const cached = existsCache.get(path);
+  if (cached !== undefined) return cached;
   try {
     await readFile(path);
-    return true;
+    existsCache.set(path, true);
   } catch {
-    return false;
+    existsCache.set(path, false);
   }
+  return existsCache.get(path) as boolean;
+}
+
+/** 仅测试用:清空表情图存在性缓存 */
+export function clearEmotionImageCache(): void {
+  existsCache.clear();
 }
 
 /** 卡的情绪键列表 */

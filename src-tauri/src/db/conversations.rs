@@ -60,9 +60,36 @@ pub struct Message {
     pub bookmarked: bool,
 }
 
+// ── Key 安全（RS-24）─────────────────────────────────────
+//
+// 消息键是 `m:{conv_id}:{id}`。若 id 允许 `:`,前缀空间会重叠:
+//   conv_id="a",     id="b:c"   → m:a:b:c
+//   conv_id="a:b",   id="c"     → m:a:b:c
+// 两条消息落到同一个键,后写覆盖先写;`scan_prefix("m:a:")` 还会把
+// 属于 conv "a:b" 的消息误算进 conv "a"。写入入口一律只允许
+// `[A-Za-z0-9_-]`。读取/删除路径不校验,保证旧键(含 ':')仍可读、可清。
+
+/// 校验新写入的会话/消息 id。只允许 ASCII 字母、数字、`_`、`-`。
+fn validate_id(kind: &str, id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err(format!("{kind}不能为空"));
+    }
+    if id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "非法{kind}「{id}」:只允许 ASCII 字母、数字、下划线、连字符\
+         (含 ':' 会与 m:<conv>:<msg> 键前缀冲突)"
+    ))
+}
+
 // ── Conversations ────────────────────────────────────────
 
 pub fn create_conv(c: &Conversation) -> Result<(), String> {
+    validate_id("会话 id", &c.id)?;
     let t = tree("conversations")?;
     t.insert(
         key("c", &c.id),
@@ -85,6 +112,7 @@ pub fn list_convs() -> Result<Vec<Conversation>, String> {
 }
 
 pub fn update_conv(id: &str, title: &str, updated_at: &str) -> Result<(), String> {
+    validate_id("会话 id", id)?;
     let t = tree("conversations")?;
     if let Some(raw) = t.get(key("c", id)).map_err(|e| format!("Get: {e}"))? {
         let mut c: Conversation = serde_json::from_slice(&raw).map_err(|e| format!("De: {e}"))?;
@@ -122,6 +150,7 @@ pub fn update_conv_summary(
     summary_msg_count: i64,
     updated_at: &str,
 ) -> Result<(), String> {
+    validate_id("会话 id", id)?;
     let t = tree("conversations")?;
     if let Some(raw) = t.get(key("c", id)).map_err(|e| format!("Get: {e}"))? {
         let mut c: Conversation = serde_json::from_slice(&raw).map_err(|e| format!("De: {e}"))?;
@@ -140,6 +169,9 @@ pub fn update_conv_summary(
 // ── Messages ─────────────────────────────────────────────
 
 pub fn add_msg(m: &Message) -> Result<(), String> {
+    // 先校验再碰 DB:非法 id 直接拒绝,不产生歧义键
+    validate_id("会话 id", &m.conv_id)?;
+    validate_id("消息 id", &m.id)?;
     let t = tree("messages")?;
     let k = format!("m:{}:{}", m.conv_id, m.id);
     t.insert(
@@ -160,6 +192,11 @@ pub fn add_msgs_batch(
     title: &str,
     updated_at: &str,
 ) -> Result<(), String> {
+    validate_id("会话 id", conv_id)?;
+    for m in msgs {
+        validate_id("会话 id", &m.conv_id)?;
+        validate_id("消息 id", &m.id)?;
+    }
     let t = tree("messages")?;
     // Same auto-title rule as the frontend single-add path: only seed the
     // title when this conversation had NO messages before this batch.
@@ -219,6 +256,8 @@ pub fn list_msgs(conv_id: &str) -> Result<Vec<Message>, String> {
 }
 
 pub fn update_msg_content(id: &str, conv_id: &str, content: &str) -> Result<(), String> {
+    validate_id("会话 id", conv_id)?;
+    validate_id("消息 id", id)?;
     let t = tree("messages")?;
     let k = format!("m:{conv_id}:{id}");
     if let Some(raw) = t.get(k.as_bytes()).map_err(|e| format!("Get: {e}"))? {
@@ -234,6 +273,8 @@ pub fn update_msg_content(id: &str, conv_id: &str, content: &str) -> Result<(), 
 }
 
 pub fn update_msg_reasoning(id: &str, conv_id: &str, reasoning: &str) -> Result<(), String> {
+    validate_id("会话 id", conv_id)?;
+    validate_id("消息 id", id)?;
     let t = tree("messages")?;
     let k = format!("m:{conv_id}:{id}");
     if let Some(raw) = t.get(k.as_bytes()).map_err(|e| format!("Get: {e}"))? {
@@ -257,6 +298,8 @@ pub fn update_msg_error(
     error: &str,
     error_kind: &str,
 ) -> Result<(), String> {
+    validate_id("会话 id", conv_id)?;
+    validate_id("消息 id", id)?;
     let t = tree("messages")?;
     let k = format!("m:{conv_id}:{id}");
     if let Some(raw) = t.get(k.as_bytes()).map_err(|e| format!("Get: {e}"))? {
@@ -274,6 +317,8 @@ pub fn update_msg_error(
 
 /// Toggle a message bookmark (消息书签): mark key messages for quick jumps.
 pub fn set_msg_bookmark(id: &str, conv_id: &str, bookmarked: bool) -> Result<(), String> {
+    validate_id("会话 id", conv_id)?;
+    validate_id("消息 id", id)?;
     let t = tree("messages")?;
     let k = format!("m:{conv_id}:{id}");
     if let Some(raw) = t.get(k.as_bytes()).map_err(|e| format!("Get: {e}"))? {
@@ -305,4 +350,83 @@ pub fn clear_messages(conv_id: &str) -> Result<(), String> {
         t.remove(k).map_err(|e| format!("Del: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(conv_id: &str, id: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            conv_id: conv_id.to_string(),
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            token_count: 1,
+            model: String::new(),
+            reasoning: String::new(),
+            seq: 0,
+            error: String::new(),
+            error_kind: String::new(),
+            bookmarked: false,
+        }
+    }
+
+    // 校验必须发生在 `tree()` 之前,所以这些用例不碰全局 DB。
+    #[test]
+    fn rejects_colon_in_conv_id() {
+        let err = add_msg(&msg("a:b", "m1")).expect_err("conv_id 含 ':' 必须拒绝");
+        assert!(err.contains("非法"), "{err}");
+    }
+
+    #[test]
+    fn rejects_colon_in_msg_id() {
+        let err = add_msg(&msg("conv1", "m:1")).expect_err("msg_id 含 ':' 必须拒绝");
+        assert!(err.contains("非法"), "{err}");
+    }
+
+    #[test]
+    fn rejects_colon_in_batch_before_db() {
+        let msgs = vec![msg("conv1", "m1"), msg("conv1", "m:2")];
+        let err = add_msgs_batch("conv1", &msgs, "t", "2026-01-01T00:00:00Z")
+            .expect_err("批量写入中任一 id 非法必须整批拒绝");
+        assert!(err.contains("非法"), "{err}");
+    }
+
+    #[test]
+    fn rejects_colon_in_create_conv() {
+        let conv = Conversation {
+            id: "a:b".to_string(),
+            title: "t".to_string(),
+            model_name: "m".to_string(),
+            system_prompt: String::new(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            character_id: String::new(),
+            persona_id: String::new(),
+            summary: String::new(),
+            summary_msg_count: 0,
+        };
+        assert!(create_conv(&conv).is_err(), "会话 id 含 ':' 必须拒绝");
+    }
+
+    #[test]
+    fn accepts_uuid_and_plain_ids() {
+        for id in [
+            uuid::Uuid::new_v4().to_string(),
+            "2f1c_9a-7B".to_string(),
+            "abc123".to_string(),
+        ] {
+            assert!(validate_id("消息 id", &id).is_ok(), "合法 id 被拒: {id}");
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_non_ascii_ids() {
+        assert!(validate_id("消息 id", "").is_err());
+        assert!(validate_id("消息 id", "消息1").is_err());
+        assert!(validate_id("消息 id", "a b").is_err());
+        assert!(validate_id("消息 id", "a/b").is_err());
+    }
 }

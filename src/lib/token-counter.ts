@@ -9,10 +9,8 @@ export function countTokens(text: string): number {
   for (const char of text) {
     if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(char)) {
       tokens += 0.6; // CJK character ≈ 0.6 tokens
-    } else if (/\s/.test(char)) {
-      tokens += 0.25; // Whitespace
     } else {
-      tokens += 0.25; // ASCII character
+      tokens += 0.25; // 其余字符(ASCII/空白/标点)同权重
     }
   }
   return Math.max(1, Math.round(tokens));

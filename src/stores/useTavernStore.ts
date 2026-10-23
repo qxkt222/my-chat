@@ -13,7 +13,10 @@ import {
 } from "@/lib/rp-prompt";
 import { translateText } from "@/lib/translate";
 import { budgetFor, shrinkMessages } from "@/lib/context-budget";
-import { applyOutgoingRegex } from "@/lib/outgoing-regex";
+import { maybeWarnBudget } from "@/lib/budget-warning";
+import { prepareOutgoingMessages } from "@/lib/outgoing-regex";
+import { toModelConfig } from "@/lib/model-config";
+import { runSummarize, SUMMARIZE_THRESHOLD } from "@/lib/summarize";
 import { askConfirm } from "@/components/ui/ConfirmDialog";
 import { showToast } from "@/components/ui/Toast";
 import { pluginAPI } from "@/plugin/PluginHost";
@@ -24,13 +27,24 @@ import {
   TARGET_KEY,
   AUTO_KEY,
   SUMMARIZE_KEY,
-  SUMMARIZE_THRESHOLD,
   AUTOSWIPE_KEY,
   AUTOSWIPE_MIN_LEN,
 } from "./tavern/constants";
 import { resolveConversationVars, mergeTimedLore, buildAttachmentBlock } from "./tavern/prompt";
 import { parseGroupOwner } from "./tavern/group-owner";
 import { assembleApiMessages, collectLorebooks, makeSamplerPicker } from "./tavern/assembly";
+import { createStreamBatcher, applyStreamDeltas } from "@/lib/stream-batcher";
+import { lastAssistantIndex } from "@/lib/message-selectors";
+
+/** 流式 token 合帧(rAF):key = assistant 消息 id。
+ *  每 token 只进待写缓冲,动画帧内一次 set —— 与工作模式同一套语义(审计 SRC-03)。 */
+const tavernStreamBatcher = createStreamBatcher<string>((batch) => {
+  useTavernStore.setState((s) => {
+    const res = applyStreamDeltas<TavernConversation, Message>(s.conversations, batch);
+    // 没有命中的消息时返回原 state,避免空通知
+    return res.changed ? { conversations: res.conversations } : s;
+  });
+});
 
 interface TavernState {
   conversations: TavernConversation[];
@@ -114,6 +128,22 @@ interface TavernState {
   getActive: () => TavernConversation | undefined;
 }
 
+/**
+ * load() 幂等守卫(SRC-01)。
+ *
+ * TavernView 用 `useEffect(() => { void tavern.load(); }, [tavern])` 触发加载,
+ * 而 zustand 每次 set() 都产生新的 state 对象 → 依赖变化 → effect 重跑 →
+ * load() 又 set() → 挂载即无限读盘(审计实测 500ms 内 34 次)。
+ *
+ * 这里做两层:
+ * - `loaded`:成功或失败过一次就不再尝试(界面只有挂载时这一个调用点,
+ *   失败也置位是为了在磁盘不可用时避免按帧重试);
+ * - `loadInFlight`:并发调用(React StrictMode 双挂载)共享同一次读盘,
+ *   否则两个调用都会在 `loaded=false` 时通过守卫。
+ * 依赖侧的修法见 TavernView.tsx / SimulationView.tsx(改用稳定动作 `s.load`)。
+ */
+let loadInFlight: Promise<void> | null = null;
+
 export const useTavernStore = create<TavernState>((set, get) => ({
   conversations: [],
   activeId: null,
@@ -127,24 +157,35 @@ export const useTavernStore = create<TavernState>((set, get) => ({
   loaded: false,
 
   load: async () => {
-    try {
-      const appDir = await getAppDir();
-      const names = await listDir(`${appDir}/tavern`);
-      const convs: TavernConversation[] = [];
-      for (const f of names) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const raw = await readFile(`${appDir}/tavern/${f}`);
-          const c = JSON.parse(raw) as TavernConversation;
-          if (c.id && c.character_id) convs.push(c);
-        } catch {
-          /* 坏文件跳过 */
+    if (get().loaded) return;
+    if (loadInFlight) return loadInFlight;
+
+    loadInFlight = (async () => {
+      try {
+        const appDir = await getAppDir();
+        const names = await listDir(`${appDir}/tavern`);
+        const convs: TavernConversation[] = [];
+        for (const f of names) {
+          if (!f.endsWith(".json")) continue;
+          try {
+            const raw = await readFile(`${appDir}/tavern/${f}`);
+            const c = JSON.parse(raw) as TavernConversation;
+            if (c.id && c.character_id) convs.push(c);
+          } catch {
+            /* 坏文件跳过 */
+          }
         }
+        convs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+        set({ conversations: convs, loaded: true });
+      } catch {
+        set({ loaded: true });
       }
-      convs.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      set({ conversations: convs, loaded: true });
-    } catch {
-      set({ loaded: true });
+    })();
+
+    try {
+      await loadInFlight;
+    } finally {
+      loadInFlight = null;
     }
   },
 
@@ -374,54 +415,25 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       ? "你是对话记忆管理员。下面是已有的对话摘要和新增对话。请把新增内容合并进摘要，保留关键事实、关系、未决问题，输出一份精炼的中文摘要（500 字内），只输出摘要正文，不要任何前后缀。"
       : "你是对话记忆管理员。请把以下对话提炼成精炼的中文摘要（保留关键事实、人物关系、设定、未决问题），500 字内，只输出摘要正文。";
 
-    const requestId = uuid();
-    let acc = "";
-    try {
-      await new Promise<void>((resolve) => {
-        void streamChat(
-          {
-            model_config: {
-              name: model.name,
-              provider: model.provider || "",
-              api_url: model.api_url,
-              api_key: model.api_key,
-              model: model.model,
-            },
-            messages: [
-              { role: "system", content: sys },
-              {
-                role: "user",
-                content: conv.summary
-                  ? `【已有摘要】\n${conv.summary}\n\n【新增对话】\n${transcript}`
-                  : transcript,
-              },
-            ],
-            temperature: 0.3,
-            thinking_enabled: false,
-          },
-          requestId,
-          {
-            onToken: (d) => {
-              acc += d;
-            },
-            onDone: () => resolve(),
-            onError: () => resolve(),
-          }
-        );
-      });
-      const summary = acc.trim();
-      if (summary) {
-        // 记账:记住总结时的消息数(阈值判定用),与摘要一起落盘
-        const updated = {
-          ...conv,
-          summary,
-          summary_msg_count: conv.messages.length,
-          updated_at: nowISO(),
-        };
-        await get().saveConv(updated);
-      }
-    } catch {
-      /* 摘要失败静默,不影响主流程 */
+    const result = await runSummarize({
+      model,
+      systemPrompt: sys,
+      userContent: conv.summary
+        ? `【已有摘要】\n${conv.summary}\n\n【新增对话】\n${transcript}`
+        : transcript,
+      label: "tavern-summarize",
+    });
+    const summary = result.summary;
+    // 只有完整结束才落盘：中断时的半截摘要会覆盖掉上一份好摘要
+    if (result.complete && summary) {
+      // 记账:记住总结时的消息数(阈值判定用),与摘要一起落盘
+      const updated = {
+        ...conv,
+        summary,
+        summary_msg_count: conv.messages.length,
+        updated_at: nowISO(),
+      };
+      await get().saveConv(updated);
     }
   },
 
@@ -573,6 +585,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
+      // 未刷新的增量在收尾之后才 apply(会重复拼接)
+      tavernStreamBatcher.flush();
       const cur = get().conversations.find((c) => c.id === conv.id);
       if (cur) {
         const msgs = cur.messages.map((m) => {
@@ -594,25 +609,22 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     };
 
     try {
-      // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const shrunk = shrinkMessages(
-        resolveConversationVars(apiMessages, conv),
-        budgetFor(model, settingsStore.budgetConfig),
-        { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
-      ).messages;
-      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
-      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)
+      // → 出站正则清理（placement=2 的「只改提示词」脚本，剥掉 internal_states /
+      // GFX 块 / IMG_PROMPT / 思考块）。
       // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
-      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
+      const shrunk = prepareOutgoingMessages(resolveConversationVars(apiMessages, conv), {
+        budget: budgetFor(model, settingsStore.budgetConfig),
+        mode: settingsStore.budgetConfig.mode,
+        summary: conv.summary,
+        regexRules: settingsStore.regexRules,
+      });
+      // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+      maybeWarnBudget(conv.id, shrunk.total, shrunk.budget);
+      const finalMessages = shrunk.messages;
       await streamChat(
         {
-          model_config: {
-            name: model.name,
-            provider: model.provider || "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
+          model_config: toModelConfig(model),
           messages: finalMessages,
           temperature: pick("temperature") ?? 0.7,
           max_tokens:
@@ -639,30 +651,11 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         requestId,
         {
           onToken: (delta) => {
-            // 流式期间直接更新该 assistant 消息(tavern 消息量小,单流可接受;
-            // MessageBubble 的 memo 保证历史消息不重渲染)
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, content: m.content + delta } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            // 只进待写缓冲,rAF 帧内一次 set(审计 SRC-03)
+            tavernStreamBatcher.add(asmMsg.id, { content: delta });
           },
           onReasoning: (d) => {
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, reasoning: (m.reasoning || "") + d } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            tavernStreamBatcher.add(asmMsg.id, { reasoning: d });
           },
           onDone: (cache) => {
             // DeepSeek 缓存诊断:记录命中率(验证三段式优化)
@@ -712,10 +705,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     if (next < 0) return; // 左到头停
     if (next >= variants.length) {
       // 右到头 → 生成新版本(仅最后一条 assistant 支持重放)
-      const isLast =
-        idx === conv.messages.length - 1 ||
-        conv.messages.slice(idx + 1).every((x) => x.role !== "assistant");
-      if (!isLast) return;
+      if (idx !== lastAssistantIndex(conv.messages)) return;
       await get().swipeGenerate(msgId);
       return;
     }
@@ -822,6 +812,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
+      // 未刷新的增量在收尾之后才 apply(会重复拼接)
+      tavernStreamBatcher.flush();
       const cur = get().conversations.find((c) => c.id === conv.id);
       if (cur) {
         const messages = cur.messages.map((m) => {
@@ -843,25 +836,22 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     };
 
     try {
-      // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const shrunk = shrinkMessages(
-        resolveConversationVars(apiMessages, conv),
-        budgetFor(model, settingsStore.budgetConfig),
-        { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
-      ).messages;
-      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
-      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)
+      // → 出站正则清理（placement=2 的「只改提示词」脚本，剥掉 internal_states /
+      // GFX 块 / IMG_PROMPT / 思考块）。
       // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
-      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
+      const shrunk = prepareOutgoingMessages(resolveConversationVars(apiMessages, conv), {
+        budget: budgetFor(model, settingsStore.budgetConfig),
+        mode: settingsStore.budgetConfig.mode,
+        summary: conv.summary,
+        regexRules: settingsStore.regexRules,
+      });
+      // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+      maybeWarnBudget(conv.id, shrunk.total, shrunk.budget);
+      const finalMessages = shrunk.messages;
       await streamChat(
         {
-          model_config: {
-            name: model.name,
-            provider: model.provider || "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
+          model_config: toModelConfig(model),
           messages: finalMessages,
           temperature: pick("temperature") ?? 0.7,
           max_tokens:
@@ -887,15 +877,8 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         requestId,
         {
           onToken: (d) => {
-            acc += d;
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) => (m.id === msgId ? { ...m, content: acc } : m)),
-              };
-            });
-            set({ conversations: convs });
+            acc += d; // finish() 用完整 acc 落盘(variants/插件后处理)
+            tavernStreamBatcher.add(msgId, { content: d });
           },
           onReasoning: () => {
             /* swipe 版本不保留 reasoning 差异 */
@@ -973,6 +956,8 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     if (activeRequestId) {
       cancelChat(activeRequestId); // Rust 侧中止流
     }
+    // 合帧补偿:取消前先落出已生成但未刷新的 token
+    tavernStreamBatcher.flush();
     set({ isStreaming: false, activeRequestId: null });
   },
 
@@ -1065,6 +1050,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
+      // 未刷新的增量在收尾之后才 apply(会重复拼接)
+      tavernStreamBatcher.flush();
       const cur = get().conversations.find((c) => c.id === conv.id);
       if (cur) {
         const messages = cur.messages.map((m) => {
@@ -1085,20 +1073,19 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     };
 
     try {
-      const finalMessages = shrinkMessages(
+      // ⚠️ 续写保持历史行为：只做预算收缩，不跑出站正则（改动会改变对外行为）。
+      // 其余三条酒馆发送链路已统一走 prepareOutgoingMessages。
+      const budgetResult = shrinkMessages(
         resolveConversationVars(apiMessages, conv),
         budgetFor(model, settingsStore.budgetConfig),
         { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
-      ).messages;
+      );
+      // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+      maybeWarnBudget(conv.id, budgetResult.total, budgetResult.budget);
+      const finalMessages = budgetResult.messages;
       await streamChat(
         {
-          model_config: {
-            name: model.name,
-            provider: model.provider || "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
+          model_config: toModelConfig(model),
           messages: finalMessages,
           temperature: pick("temperature") ?? 0.7,
           max_tokens:
@@ -1124,17 +1111,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         requestId,
         {
           onToken: (d) => {
-            acc += d;
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === msgId ? { ...m, content: prefix + acc } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            acc += d; // finish() 用 prefix + acc 落盘
+            // 续写开始时消息内容已置为 prefix → 增量追加即可
+            tavernStreamBatcher.add(msgId, { content: d });
           },
           onReasoning: () => {
             /* 继续不保留 reasoning 差异 */
@@ -1310,6 +1289,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
+      // 未刷新的增量在收尾之后才 apply(会重复拼接)
+      tavernStreamBatcher.flush();
       const cur = get().conversations.find((c) => c.id === conv.id);
       if (cur) {
         const msgs = cur.messages.map((m) => {
@@ -1359,25 +1341,22 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     };
 
     try {
-      // Token 预算(自动模式):发送前按优先级收缩(历史超限整段替换为摘要,保缓存前缀)
-      const shrunk = shrinkMessages(
-        resolveConversationVars(apiMessages, conv),
-        budgetFor(model, settingsStore.budgetConfig),
-        { mode: settingsStore.budgetConfig.mode, summary: conv.summary }
-      ).messages;
-      // 出站正则清理（酒馆 placement=2 的「只改提示词」脚本）：在收缩之后、发送之前跑，
-      // 剥掉 <internal_states> / GFX 块 / <!-- IMG_PROMPT:… --> / 思考块，让发出去的体积更小。
+      // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)
+      // → 出站正则清理（placement=2 的「只改提示词」脚本，剥掉 internal_states /
+      // GFX 块 / IMG_PROMPT / 思考块）。
       // ⚠️ 只作用于这份待发副本，绝不回写 conv.messages（界面显示不受影响）。
-      const finalMessages = applyOutgoingRegex(shrunk, settingsStore.regexRules);
+      const shrunk = prepareOutgoingMessages(resolveConversationVars(apiMessages, conv), {
+        budget: budgetFor(model, settingsStore.budgetConfig),
+        mode: settingsStore.budgetConfig.mode,
+        summary: conv.summary,
+        regexRules: settingsStore.regexRules,
+      });
+      // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+      maybeWarnBudget(conv.id, shrunk.total, shrunk.budget);
+      const finalMessages = shrunk.messages;
       await streamChat(
         {
-          model_config: {
-            name: model.name,
-            provider: model.provider || "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
+          model_config: toModelConfig(model),
           messages: finalMessages,
           temperature: pick("temperature") ?? 0.7,
           max_tokens:
@@ -1403,28 +1382,10 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         requestId,
         {
           onToken: (delta) => {
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, content: m.content + delta } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            tavernStreamBatcher.add(asmMsg.id, { content: delta });
           },
           onReasoning: (d) => {
-            const convs = get().conversations.map((c) => {
-              if (c.id !== conv.id) return c;
-              return {
-                ...c,
-                messages: c.messages.map((m) =>
-                  m.id === asmMsg.id ? { ...m, reasoning: (m.reasoning || "") + d } : m
-                ),
-              };
-            });
-            set({ conversations: convs });
+            tavernStreamBatcher.add(asmMsg.id, { reasoning: d });
           },
           onDone: (cache) => {
             if (cache && cache.hit + cache.miss > 0) {

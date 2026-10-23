@@ -12,9 +12,12 @@ import { useChatStore } from "./stores/useChatStore";
 import { useAppConfigStore, applyFontSize } from "./stores/useAppConfigStore";
 import { AppShell } from "./components/layout/AppShell";
 import { CommandPalette } from "./components/ui/CommandPalette";
+import { McpPermissionDialog } from "./components/settings/McpPermissionDialog";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { getSubModels, getCachedModels } from "./lib/model-presets";
-import { useT } from "./lib/i18n";
+import { useT, t as tStatic } from "./lib/i18n";
+import { showToast } from "./components/ui/Toast";
+import { logDiag } from "./lib/tauri";
 
 export default function App() {
   const t = useT();
@@ -62,7 +65,14 @@ export default function App() {
       useMemoryStore.getState().load(),
       useCharacterStore.getState().load(),
       useTranslateStore.getState().load(),
-    ]).finally(() => setLoading(false));
+    ])
+      .catch((e: unknown) => {
+        // 单店 load() 内部大多自吞异常；这里兜住意外 rejection，避免启动时
+        // 只留下一个 unhandled rejection、用户却以为「数据就是空的」。
+        logDiag(`bootstrap load failed: ${String(e)}`);
+        showToast("error", tStatic("app.partialLoadFailed"));
+      })
+      .finally(() => setLoading(false));
     // 空闲时预加载 markdown 渲染栈（react-markdown + highlight ~600KB），
     // 让第一条 AI 回复完成时无需等待懒加载。
     const idle =
@@ -228,6 +238,8 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      {/* MCP 运行时授权：后端对未配置权限的工具发 mcp-permission-request */}
+      <McpPermissionDialog />
     </>
   );
 }

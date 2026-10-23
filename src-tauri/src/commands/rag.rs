@@ -47,11 +47,15 @@ pub async fn rag_search(query: RagQuery) -> Result<Vec<SearchResultDto>, String>
     let top_k = query.top_k.unwrap_or(3);
     let mode = query.mode.as_deref().unwrap_or("hybrid");
 
-    // 读候选 chunks（sled 读，快）
-    let chunks = match query.kb_id.as_deref() {
-        Some(kbid) => crate::db::knowledge::list_chunks(kbid)?,
-        None => crate::db::knowledge::list_all_chunks_with_embeddings()?,
-    };
+    // 读候选 chunks：sled 是全同步的磁盘/内存扫描，放在 async 里会阻塞
+    // tokio worker（大知识库时整个 runtime 卡住）。挪进 spawn_blocking（RS-16）。
+    let kb_id = query.kb_id.clone();
+    let chunks = tauri::async_runtime::spawn_blocking(move || match kb_id.as_deref() {
+        Some(id) => crate::db::knowledge::list_chunks(id),
+        None => crate::db::knowledge::list_all_chunks_with_embeddings(),
+    })
+    .await
+    .map_err(|e| format!("读取知识库线程错误: {e}"))??;
     if chunks.is_empty() {
         return Ok(Vec::new());
     }
@@ -110,7 +114,8 @@ pub async fn rag_rerank(
     user.push_str("\n\n候选段落:\n");
     user.push_str(&doc_block);
 
-    let client = reqwest::Client::new();
+    // RS-07/RS-16：共享客户端（连接 10s / 总 120s / 不跟随重定向）。
+    let client = crate::net::client();
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -157,21 +162,32 @@ pub async fn rag_rerank(
     Ok(indices)
 }
 
+/// 前端参数不可信：`chunk_size` / `overlap` 直接来自 invoke 入参。
+/// 统一收敛（RS-06），避免 `chunk_size=0` 或 `overlap>=chunk_size` 打进引擎。
+fn index_params(req: &IndexRequest) -> (usize, usize) {
+    crate::db::knowledge::clamp_chunk_params(
+        req.chunk_size.unwrap_or(500),
+        req.overlap.unwrap_or(50),
+    )
+}
+
 #[tauri::command]
 pub async fn rag_index_document(req: IndexRequest) -> Result<usize, String> {
+    let (chunk_size, overlap) = index_params(&req);
     rag::index_document(
         &req.kb_id,
         &req.file_id,
         &req.content,
         &EmbeddingProvider::Keyword,
-        req.chunk_size.unwrap_or(500),
-        req.overlap.unwrap_or(50),
+        chunk_size,
+        overlap,
     )
     .await
 }
 
 #[tauri::command]
 pub async fn rag_index_with_openai(req: IndexRequest, api_key: String) -> Result<usize, String> {
+    let (chunk_size, overlap) = index_params(&req);
     rag::index_document(
         &req.kb_id,
         &req.file_id,
@@ -180,8 +196,8 @@ pub async fn rag_index_with_openai(req: IndexRequest, api_key: String) -> Result
             api_key,
             model: "text-embedding-3-small".to_string(),
         },
-        req.chunk_size.unwrap_or(500),
-        req.overlap.unwrap_or(50),
+        chunk_size,
+        overlap,
     )
     .await
 }

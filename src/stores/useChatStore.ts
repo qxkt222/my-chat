@@ -1,7 +1,11 @@
 import { create } from "zustand";
 import type { Message, ChatRequest, ModelConfig } from "@/types";
 import { streamChat, cancelChat, classifyError, logDiag } from "@/lib/tauri";
-import { budgetFor, shrinkMessages } from "@/lib/context-budget";
+import { budgetFor } from "@/lib/context-budget";
+import { prepareOutgoingMessages } from "@/lib/outgoing-regex";
+import { toModelConfig } from "@/lib/model-config";
+import { runSummarize, SUMMARIZE_THRESHOLD } from "@/lib/summarize";
+import { maybeWarnBudget } from "@/lib/budget-warning";
 import { showToast } from "@/components/ui/Toast";
 import { t } from "@/lib/i18n";
 import { buildRpSystemParts } from "@/lib/rp-prompt";
@@ -12,31 +16,20 @@ import { useCharacterStore } from "./useCharacterStore";
 import { useCacheStatsStore } from "./useCacheStatsStore";
 import { useTaskStore } from "./useTaskStore";
 import { setMessagesProvider, pluginAPI } from "@/plugin/PluginHost";
+import { createStreamBatcher } from "@/lib/stream-batcher";
 
 // 工具与常量抽到 ./chat/utils.ts（它们与 store 状态无关）
-// 注：下面的 pendingStreams / flushPendingStreams 依赖 useChatStore.setState，
-// 搬出去会形成循环依赖，故有意留在本文件。
-import {
-  msgId,
-  nowISO,
-  WORK_SUMMARIZE_KEY,
-  WORK_SUMMARIZE_THRESHOLD,
-  WORK_TEMP_MODE_KEY,
-} from "./chat/utils";
+// 注：合帧算法在 lib/stream-batcher.ts（纯实现，三处 store 共用）；
+// 只有 flush 回调（依赖 useChatStore.setState）留在这里，避免循环依赖。
+import { msgId, nowISO, WORK_SUMMARIZE_KEY, WORK_TEMP_MODE_KEY } from "./chat/utils";
 import { assembleRpMessages } from "./chat/rp-messages";
 // 世界书四源合并与酒馆共用同一份实现（含「群聊归组」那类约定），不再各写一遍
 import { collectLorebooks } from "./tavern/assembly";
 
 /** 流式 token 合帧(rAF):每个 requestId 待刷新的 token 累积,每帧最多一次 set。
- *   finish()/cancel 前需 flush 挂起帧,否则最后一批 token 会丢。 */
-const pendingStreams = new Map<string, { content: string; reasoning: string }>();
-let flushScheduled = false;
-
-/** 立即刷新挂起的流式帧(供 finish/cancel 在读取最终值前调用) */
-function flushPendingStreams(): void {
-  if (pendingStreams.size === 0) return;
-  const batch = new Map(pendingStreams);
-  pendingStreams.clear();
+ *   finish()/cancel 前需 flush 挂起帧,否则最后一批 token 会丢。
+ *   合帧算法与酒馆/推演共用 lib/stream-batcher(审计 SRC-03)。 */
+const streamBatcher = createStreamBatcher<string>((batch) => {
   useChatStore.setState((s) => {
     const streamingContent = { ...s.streamingContent };
     const streamingReasoning = { ...s.streamingReasoning };
@@ -46,6 +39,11 @@ function flushPendingStreams(): void {
     }
     return { streamingContent, streamingReasoning };
   });
+});
+
+/** 立即刷新挂起的流式帧(供 finish/cancel 在读取最终值前调用) */
+function flushPendingStreams(): void {
+  streamBatcher.flush();
 }
 
 // Register messages provider for plugins
@@ -196,6 +194,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
+    // 当前轮用户输入：必须在历史之后、变量尾段（知识库/摘要）之前。
+    // 之前这里漏掉了这一条 —— messages 只从 conv.messages（旧历史）组装，
+    // 导致工作模式每轮发给模型的内容里没有用户刚输入的那句话。
+    // 用 processedContent（插件 beforeSend 之后），不是原始 content。
+    // skipUserAppend（重新生成）：历史末尾已经有这条 user 消息，不能再追加。
+    if (!opts?.skipUserAppend) {
+      messages.push({ role: "user", content: processedContent });
+    }
+
     // Knowledge context goes LAST (variable tail, does not invalidate the prefix)
     if (knowledgeContext) {
       messages.push({ role: "system", content: `Reference Knowledge:\n${knowledgeContext}` });
@@ -276,22 +283,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const maxTokens =
           modelConfig.parameters?.max_tokens ?? settingsStore.defaultParameters.max_tokens ?? null;
 
-        // Token 预算(自动模式):发送前按优先级收缩,历史超限整段替换为摘要
-        // (保三段式前缀稳定,DeepSeek 缓存不失效)。手动模式只统计不砍。
+        // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要,
+        // 保三段式前缀稳定) → 出站正则清理(placement=2,只作用于待发副本)。
+        // 手动模式只统计不砍。
         const settings = useSettingsStore.getState();
-        const shrunk = shrinkMessages(messages, budgetFor(modelConfig, settings.budgetConfig), {
+        const shrunk = prepareOutgoingMessages(messages, {
+          budget: budgetFor(modelConfig, settings.budgetConfig),
           mode: settings.budgetConfig.mode,
           summary: conv?.summary,
+          regexRules: settings.regexRules,
         });
+        // 接近/超出预算时主动提醒(只弹 Toast,不影响发送)
+        maybeWarnBudget(convId, shrunk.total, shrunk.budget);
         const finalMessages = shrunk.messages;
         const request: ChatRequest = {
-          model_config: {
-            name: modelConfig.name,
-            provider: modelConfig.provider || "",
-            api_url: modelConfig.api_url,
-            api_key: modelConfig.api_key,
-            model: modelConfig.model,
-          },
+          model_config: toModelConfig(modelConfig),
           messages: finalMessages,
           temperature,
           max_tokens: maxTokens,
@@ -403,59 +409,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // 每帧多次重渲染(React 18 自动批处理跨异步边界有限)。合帧后每帧最多
           // 一次 set → 流式渲染节奏与屏幕刷新对齐,CPU 峰值下降。
           onToken: (delta) => {
-            const pend = pendingStreams.get(requestId) || { content: "", reasoning: "" };
-            pend.content += delta;
-            pendingStreams.set(requestId, pend);
-            if (!flushScheduled) {
-              flushScheduled = true;
-              requestAnimationFrame(() => {
-                flushScheduled = false;
-                if (pendingStreams.size === 0) return;
-                const batch = new Map(pendingStreams);
-                pendingStreams.clear();
-                set((s) => {
-                  const streamingContent = { ...s.streamingContent };
-                  const streamingReasoning = { ...s.streamingReasoning };
-                  for (const [rid, p] of batch) {
-                    if (p.content) {
-                      streamingContent[rid] = (streamingContent[rid] || "") + p.content;
-                    }
-                    if (p.reasoning) {
-                      streamingReasoning[rid] = (streamingReasoning[rid] || "") + p.reasoning;
-                    }
-                  }
-                  return { streamingContent, streamingReasoning };
-                });
-              });
-            }
+            streamBatcher.add(requestId, { content: delta });
           },
           onReasoning: (delta) => {
             // 与 onToken 同一 rAF 合帧(思考 token 与正文 token 交错到达,合并刷新)
-            const pend = pendingStreams.get(requestId) || { content: "", reasoning: "" };
-            pend.reasoning += delta;
-            pendingStreams.set(requestId, pend);
-            if (!flushScheduled) {
-              flushScheduled = true;
-              requestAnimationFrame(() => {
-                flushScheduled = false;
-                if (pendingStreams.size === 0) return;
-                const batch = new Map(pendingStreams);
-                pendingStreams.clear();
-                set((s) => {
-                  const streamingContent = { ...s.streamingContent };
-                  const streamingReasoning = { ...s.streamingReasoning };
-                  for (const [rid, p] of batch) {
-                    if (p.content) {
-                      streamingContent[rid] = (streamingContent[rid] || "") + p.content;
-                    }
-                    if (p.reasoning) {
-                      streamingReasoning[rid] = (streamingReasoning[rid] || "") + p.reasoning;
-                    }
-                  }
-                  return { streamingContent, streamingReasoning };
-                });
-              });
-            }
+            streamBatcher.add(requestId, { reasoning: delta });
           },
           onDone: (cache) => {
             // DeepSeek 缓存命中率:全部记录进诊断面板(设置→缓存);
@@ -591,48 +549,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     showToast("info", t("chat.compressing"));
 
-    // Raw streaming call — does NOT touch the conversation (no user/assistant msgs added)
-    const summary = await new Promise<string>((resolve) => {
-      const requestId = msgId();
-      let acc = "";
-      let settled = false;
-      const done = () => {
-        if (!settled) {
-          settled = true;
-          resolve(acc);
-        }
-      };
-      streamChat(
-        {
-          model_config: {
-            name: model.name,
-            provider: "",
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
-          messages: [
-            { role: "system", content: sys },
-            { role: "user", content: transcript },
-          ],
-          temperature: 0.3,
-          thinking_enabled: false,
-        },
-        requestId,
-        {
-          onToken: (d) => {
-            acc += d;
-          },
-          onDone: done,
-          onError: (e) => {
-            logDiag(`compress err: ${String(e)}`);
-            done();
-          },
-        }
-      );
-    }).catch(() => "");
-
-    if (!summary.trim()) {
+    // Raw streaming call — does NOT touch the conversation (no user/assistant msgs added)。
+    // 只有流完整结束才允许用它替换历史：中断时的半截摘要会永久丢上下文。
+    const result = await runSummarize({
+      model,
+      systemPrompt: sys,
+      userContent: transcript,
+      label: "work-compress",
+    });
+    const summary = result.summary;
+    if (!result.complete || !summary) {
       showToast("error", t("chat.compressFailed"));
       return;
     }
@@ -643,7 +569,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       {
         id: msgId(),
         role: "system",
-        content: `【此前对话摘要】\n${summary.trim()}`,
+        content: `【此前对话摘要】\n${summary}`,
         timestamp: now,
       },
     ]);
@@ -673,7 +599,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!model) return;
     // 记账式阈值:距上次摘要新增消息数 ≥ N 才总结(不随清空/压缩漂移)
     const lastCount = conv.summary_msg_count ?? 0;
-    if (conv.messages.length - lastCount < WORK_SUMMARIZE_THRESHOLD) return;
+    if (conv.messages.length - lastCount < SUMMARIZE_THRESHOLD) return;
 
     // 后台任务队列(20):摘要走独立任务跑,不阻塞发送链路;侧栏「任务」面板可见进度
     const taskStore = useTaskStore.getState();
@@ -692,51 +618,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? "你是对话记忆管理员。下面是已有的对话摘要和新增对话。请把新增内容合并进摘要，保留关键事实、结论、用户偏好、未决问题，输出一份精炼的中文摘要（500 字内），只输出摘要正文，不要任何前后缀。"
         : "你是对话记忆管理员。请把以下对话提炼成精炼的中文摘要（保留关键事实、结论、用户偏好、未决问题），500 字内，只输出摘要正文。";
 
-      let acc = "";
-      try {
-        await new Promise<void>((resolve) => {
-          void streamChat(
-            {
-              model_config: {
-                name: model.name,
-                provider: model.provider || "",
-                api_url: model.api_url,
-                api_key: model.api_key,
-                model: model.model,
-              },
-              messages: [
-                { role: "system", content: sys },
-                {
-                  role: "user",
-                  content: cur.summary
-                    ? `【已有摘要】\n${cur.summary}\n\n【新增对话】\n${transcript}`
-                    : transcript,
-                },
-              ],
-              temperature: 0.3,
-              thinking_enabled: false,
-            },
-            msgId(),
-            {
-              onToken: (d) => {
-                acc += d;
-                report(Math.min(90, 10 + acc.length)); // 进度:流式长度近似
-              },
-              onDone: () => resolve(),
-              onError: () => resolve(),
-            }
-          );
-        });
-      } catch {
-        /* 摘要失败静默,不影响主流程 */
-      }
-      const summary = acc.trim();
-      if (summary) {
+      const result = await runSummarize({
+        model,
+        systemPrompt: sys,
+        userContent: cur.summary
+          ? `【已有摘要】\n${cur.summary}\n\n【新增对话】\n${transcript}`
+          : transcript,
+        label: "work-summarize",
+        onProgress: (chars) => report(Math.min(90, 10 + chars)), // 进度:流式长度近似
+      });
+      const summary = result.summary;
+      // 只有完整结束才落盘：中断时的半截摘要会覆盖掉上一份好摘要
+      if (result.complete && summary) {
         // 记账:记住总结时的消息数(阈值判定用),摘要持久化
         await useConversationStore.getState().updateSummary(convId, summary, cur.messages.length);
       }
       report(100);
-      return summary ? `已更新摘要(${summary.length} 字)` : "摘要为空";
+      return result.complete && summary ? `已更新摘要(${summary.length} 字)` : "摘要为空";
     });
   },
 }));

@@ -7,10 +7,13 @@
 mod adapters;
 mod commands;
 mod db;
-mod plugin;
+mod net;
 mod rag;
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // ── App data dir ──────────────────────────────────────────
 fn app_data_dir() -> PathBuf {
@@ -30,20 +33,49 @@ fn app_data_dir() -> PathBuf {
 /// `delete_item` 走的是 `remove_dir_all`，一次误传就是一棵目录树没了，
 /// 而且没有任何二次确认。写文件 / 删文件 / 建目录 / 列目录一律先过它。
 ///
-/// 读类命令（`read_file` / `read_file_bytes`）**故意不设限** —— 角色卡、世界书、
-/// 预设的导入都要读用户在文件对话框里选的文件（可能在桌面或任何盘），
-/// 限制它们会直接废掉导入功能；而读不会毁数据。
+/// 读类命令走 `resolve_readable_path`：应用数据目录内，或用户刚在原生
+/// 文件对话框里选过的路径（10 分钟令牌）。导入仍需读桌面/任意盘的文件，
+/// 但不再允许前端凭一段字符串读取任意文件。
 pub(crate) fn guard_path(raw: &str) -> Result<PathBuf, String> {
-    let root =
-        std::fs::canonicalize(app_data_dir()).map_err(|e| format!("应用数据目录不可用: {e}"))?;
+    match guard_path_within(&app_data_dir(), raw) {
+        Ok(p) => Ok(p),
+        Err(msg) => {
+            crate::commands::chat::log_chat_error(&msg);
+            Err(msg)
+        }
+    }
+}
+
+/// 守卫的纯函数核心：root 可注入，便于用临时目录单测。
+///
+/// 关键点（RS-13）：目标**不存在**时不能退回纯词法路径 ——
+/// `app_data/link-out/new.txt`（`link-out` 是指向外部的目录联接）整串不存在，
+/// 词法检查会放行，写入却落到根外。这里改为 canonicalize「最近存在的祖先」
+/// 再拼回不存在的尾部，前缀判断始终基于真实路径。
+fn guard_path_within(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(root).map_err(|e| format!("应用数据目录不可用: {e}"))?;
     // ⚠️ Windows 的 canonicalize 返回 `\\?\C:\...` 形式的 verbatim 路径，
     //    与普通路径做前缀比较会**假失败**（实测踩过：根内的合法路径被判成越界，
     //    而只测「越界被拒」的话它会假绿通过）。两侧统一剥掉此前缀。
     let root = strip_verbatim(&root);
-    let p = PathBuf::from(raw);
 
     // 词法规范化：消掉 "." 与 ".."。不能只靠 `canonicalize` ——
     // `create_dir` 的目标必然不存在，`canonicalize` 会直接失败。
+    let norm = lexical_normalize(Path::new(raw));
+
+    let resolved = resolve_via_existing_ancestor(&norm)
+        .ok_or_else(|| format!("无法解析路径: {}", norm.display()))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "拒绝越界路径（只允许应用数据目录内）: {}",
+            norm.display()
+        ));
+    }
+    Ok(norm)
+}
+
+/// 词法规范化：消掉 `.` 与 `..`（不访问文件系统）。
+fn lexical_normalize(p: &Path) -> PathBuf {
     let mut norm = PathBuf::new();
     for c in p.components() {
         match c {
@@ -54,23 +86,130 @@ pub(crate) fn guard_path(raw: &str) -> Result<PathBuf, String> {
             other => norm.push(other.as_os_str()),
         }
     }
+    norm
+}
 
-    // 已存在的部分再解一次符号链接，防「链接指向外部」绕过前缀检查
-    let resolved =
-        std::fs::canonicalize(&norm).map_or_else(|_| norm.clone(), |a| strip_verbatim(&a));
-    if !resolved.starts_with(&root) {
-        let msg = format!("拒绝越界路径（只允许应用数据目录内）: {}", p.display());
-        crate::commands::chat::log_chat_error(&msg);
-        return Err(msg);
+/// 把「最近存在的祖先目录」canonicalize（解掉符号链接 / 目录联接），
+/// 再把尚不存在的尾部原样拼回去。返回的是**真实**路径。
+fn resolve_via_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&cur) {
+            let mut resolved = strip_verbatim(&canonical);
+            for seg in tail.iter().rev() {
+                resolved.push(seg);
+            }
+            return Some(resolved);
+        }
+        let name = cur.file_name()?.to_os_string();
+        if !cur.pop() {
+            return None;
+        }
+        tail.push(name);
     }
-    Ok(norm)
+}
+
+/// 写入后复核：写入目标 canonicalize 后再与根比一次，越界就删掉。
+///
+/// 守卫 + 写入之间仍有 TOCTOU 窗口（祖先目录被换成联接），这一步兜底。
+pub(crate) fn verify_write_inside_app_dir(p: &Path) -> Result<(), String> {
+    let root =
+        std::fs::canonicalize(app_data_dir()).map_err(|e| format!("应用数据目录不可用: {e}"))?;
+    let root = strip_verbatim(&root);
+    let actual = std::fs::canonicalize(p).map_err(|e| format!("写入后复核失败: {e}"))?;
+    let actual = strip_verbatim(&actual);
+    if actual.starts_with(&root) {
+        return Ok(());
+    }
+    // 越界：先删真实目标（万一 p 是链接），再删 p 本身。
+    let _ = std::fs::remove_file(&actual);
+    let _ = std::fs::remove_file(p);
+    let msg = format!("写入目标越界，已删除: {}", p.display());
+    crate::commands::chat::log_chat_error(&msg);
+    Err(msg)
 }
 
 /// 剥掉 Windows `canonicalize` 产生的 `\\?\` verbatim 前缀。
-fn strip_verbatim(p: &std::path::Path) -> PathBuf {
+fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     s.strip_prefix(r"\\?\")
         .map_or_else(|| p.to_path_buf(), PathBuf::from)
+}
+
+// ── 读令牌（RS-05）───────────────────────────────────────
+//
+// 读类命令不再接受任意路径：只认「应用数据目录内」或「用户刚在原生文件
+// 对话框里选过、10 分钟内有效」的路径。令牌放在进程内，重启即失效。
+
+/// 对话框选中后的可读窗口。
+const READ_TOKEN_TTL: Duration = Duration::from_mins(10);
+/// 单文件读取上限。
+pub(crate) const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
+
+static READ_TOKENS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+
+fn read_tokens() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    READ_TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 令牌键：能 canonicalize 就用真实路径（同一文件的不同写法归一）。
+fn token_key(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).map_or_else(|_| p.to_path_buf(), |c| strip_verbatim(&c))
+}
+
+/// 登记一个用户通过文件对话框选中的路径。
+pub(crate) fn register_read_token(path: &Path) {
+    let key = token_key(path);
+    let mut map = read_tokens()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    map.retain(|_, at| now.saturating_duration_since(*at) < READ_TOKEN_TTL);
+    map.insert(key, now);
+}
+
+fn read_token_valid_at(path: &Path, now: Instant) -> bool {
+    let key = token_key(path);
+    // ⚠️ 只读不清理：清理动作放进 `register_read_token`。这里若按传入的
+    //    `now` 做 retain，单测用「未来时刻」验证过期时会顺手删掉并发的有效令牌
+    //    （实测过：并行跑测试时互相踩）。
+    let map = read_tokens()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.get(&key)
+        .is_some_and(|at| now.saturating_duration_since(*at) < READ_TOKEN_TTL)
+}
+
+/// 读侧准入：应用数据目录内，或持有未过期的对话框令牌。
+pub(crate) fn resolve_readable_path(raw: &str) -> Result<PathBuf, String> {
+    if guard_path_within(&app_data_dir(), raw).is_ok() {
+        return Ok(lexical_normalize(Path::new(raw)));
+    }
+    let p = PathBuf::from(raw);
+    if read_token_valid_at(&p, Instant::now()) {
+        return Ok(p);
+    }
+    Err(format!(
+        "拒绝读取未授权路径（需经文件对话框选择，或在应用数据目录内）: {}",
+        p.display()
+    ))
+}
+
+/// 读前体积检查（防止一次 IPC 读进超大文件把内存打满）。
+pub(crate) fn check_read_size(path: &Path, limit: u64) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Read error: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("不是普通文件: {}", path.display()));
+    }
+    if meta.len() > limit {
+        return Err(format!(
+            "文件过大: {} 字节（上限 {} MB）",
+            meta.len(),
+            limit / (1024 * 1024)
+        ));
+    }
+    Ok(())
 }
 
 // ── File system commands ──────────────────────────────────
@@ -81,7 +220,9 @@ fn get_app_dir() -> String {
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("Read error: {e}"))
+    let p = resolve_readable_path(&path)?;
+    check_read_size(&p, MAX_READ_BYTES)?;
+    std::fs::read_to_string(&p).map_err(|e| format!("Read error: {e}"))
 }
 
 #[tauri::command]
@@ -90,7 +231,8 @@ fn write_file(path: String, content: String) -> Result<(), String> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {e}"))?;
     }
-    std::fs::write(&p, content).map_err(|e| format!("Write error: {e}"))
+    std::fs::write(&p, content).map_err(|e| format!("Write error: {e}"))?;
+    verify_write_inside_app_dir(&p)
 }
 
 #[tauri::command]
@@ -123,7 +265,7 @@ fn create_dir(path: String) -> Result<(), String> {
 // ── Entry point ──────────────────────────────────────────
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // opener：markdown 里的外链改由**系统浏览器**打开。
         // 此前注册的是 shell 插件——前端零引用、capabilities 也没授权，
         // 等于白背一个「能起子进程」的插件，已随本次一并移除。
@@ -233,6 +375,7 @@ pub fn run() {
             commands::mcp::mcp_revoke_tool,
             commands::mcp::mcp_list_grants,
             commands::mcp::mcp_audit,
+            commands::mcp::mcp_resolve_permission,
             commands::docs::pick_file,
             commands::docs::extract_document_text,
             commands::docs::ocr_image,
@@ -245,8 +388,29 @@ pub fn run() {
             commands::card_io::write_file_bytes,
             commands::translate::translate_text,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // RS-19: 退出时显式把 sled 内存表刷到磁盘。失败只记日志、不 panic ——
+    // 退出路径上的 panic 会给用户弹崩溃窗,而这里最坏只是丢掉最后几秒写入。
+    // setup 里 `db::init_db()?` 成功才会走到 `run()`,因此 DB 必已初始化;
+    // `db::db()` 不会在这里触发一次新的打开。
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            match db::db() {
+                Ok(db) => {
+                    if let Err(e) = db.flush() {
+                        crate::commands::chat::log_chat_error(&format!("EXIT_FLUSH: {e}"));
+                    }
+                }
+                Err(e) => {
+                    crate::commands::chat::log_chat_error(&format!(
+                        "EXIT_FLUSH: 数据库不可用: {e}"
+                    ));
+                }
+            }
+        }
+    });
 }
 
 // ── Database commands ────────────────────────────────────
@@ -336,5 +500,122 @@ mod guard_tests {
             guard_path(not_yet.to_string_lossy().as_ref()).is_ok(),
             "根目录内尚不存在的路径也应放行"
         );
+    }
+
+    // ── 以下用例一律用临时目录，不碰用户数据 ──────────────
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let p =
+            std::env::temp_dir().join(format!("my-chat-test-{tag}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&p).expect("创建临时目录");
+        p
+    }
+
+    /// 目标不存在时，越界仍必须被拒（不能退回纯词法路径）。
+    #[test]
+    fn guard_rejects_nonexistent_target_outside_root() {
+        let root = temp_dir("root-a");
+        let outside = temp_dir("outside-a");
+        let target = outside.join("nope.txt");
+        let result = guard_path_within(&root, target.to_string_lossy().as_ref());
+        assert!(result.is_err(), "根外不存在的目标应被拒绝");
+
+        // 根内不存在的目标应放行
+        let inside = root.join("sub").join("nope.txt");
+        assert!(
+            guard_path_within(&root, inside.to_string_lossy().as_ref()).is_ok(),
+            "根内不存在的目标应放行"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 目录联接（junction）指向根外时，即使叶子不存在也必须拒绝（RS-13）。
+    #[cfg(windows)]
+    #[test]
+    fn guard_rejects_junction_escape() {
+        let root = temp_dir("root-j");
+        let outside = temp_dir("outside-j");
+        let link = root.join("link-out");
+
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .status();
+        let created = matches!(&status, Ok(s) if s.success()) && link.exists();
+        if !created {
+            // 某些环境禁用了 junction：跳过而不是假绿/假红
+            eprintln!("跳过：无法创建目录联接");
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&outside);
+            return;
+        }
+
+        let target = link.join("sub").join("new.txt");
+        let result = guard_path_within(&root, target.to_string_lossy().as_ref());
+        assert!(result.is_err(), "经目录联接逃出根外的路径必须被拒绝");
+
+        // 先删联接本身（remove_dir 只删 reparse point，不递归目标），再清临时目录
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 对话框令牌：登记后可用，过期后失效。只碰临时文件。
+    #[test]
+    fn read_token_expires() {
+        let dir = temp_dir("token");
+        let file = dir.join("picked.txt");
+        std::fs::write(&file, b"x").expect("写临时文件");
+
+        register_read_token(&file);
+        let now = Instant::now();
+        assert!(read_token_valid_at(&file, now), "刚登记应有效");
+
+        let later = now
+            .checked_add(READ_TOKEN_TTL + Duration::from_secs(1))
+            .expect("时间加法");
+        assert!(!read_token_valid_at(&file, later), "过期后应失效");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未登记的根外路径读不到；登记后可读。
+    #[test]
+    fn resolve_readable_path_requires_token_or_app_dir() {
+        let dir = temp_dir("read-gate");
+        let file = dir.join("secret.txt");
+        std::fs::write(&file, b"secret").expect("写临时文件");
+
+        assert!(
+            resolve_readable_path(file.to_string_lossy().as_ref()).is_err(),
+            "未登记的根外路径应拒绝"
+        );
+
+        register_read_token(&file);
+        assert!(
+            resolve_readable_path(file.to_string_lossy().as_ref()).is_ok(),
+            "登记后应放行"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 50 MB 上限的判定逻辑（用极小阈值测，不生成大文件）。
+    #[test]
+    fn read_size_limit_is_enforced() {
+        let dir = temp_dir("size");
+        let file = dir.join("small.txt");
+        std::fs::write(&file, b"0123456789").expect("写临时文件");
+
+        assert!(check_read_size(&file, 5).is_err(), "超过上限应拒绝");
+        assert!(check_read_size(&file, 100).is_ok(), "未超上限应放行");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

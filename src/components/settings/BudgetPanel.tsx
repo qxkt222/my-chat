@@ -4,6 +4,7 @@ import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useConversationStore } from "@/stores/useConversationStore";
 import { useT } from "@/lib/i18n";
 import { budgetFor } from "@/lib/context-budget";
+import { countTokens } from "@/lib/token-counter";
 
 /**
  * Token 预算面板(设置→预算,跨三模式共用):
@@ -18,7 +19,7 @@ export function BudgetPanel() {
   const model = s.models.find((m) => m.name === s.activeModel);
   const budget = budgetFor(model, s.budgetConfig);
 
-  // 当前会话各槽占用(用 countTokens 估算;system 段按前缀归类)
+  // 当前会话各槽占用:与 shrinkMessages 同口径,统一用 countTokens;system 段按前缀归类
   const segments = useMemo(() => {
     const msgs = activeConv?.messages || [];
     const groups = new Map<string, number>();
@@ -26,13 +27,13 @@ export function BudgetPanel() {
     for (const m of msgs) {
       const c = m.content || "";
       if (m.role === "user" || m.role === "assistant") {
-        hist += c.length * 0.25;
+        hist += countTokens(c);
       } else if (c.startsWith("【对话摘要】")) {
-        groups.set("摘要", (groups.get("摘要") || 0) + c.length * 0.6);
+        groups.set("摘要", (groups.get("摘要") || 0) + countTokens(c));
       } else if (c.startsWith("【世界书")) {
-        groups.set("世界书", (groups.get("世界书") || 0) + c.length * 0.6);
+        groups.set("世界书", (groups.get("世界书") || 0) + countTokens(c));
       } else {
-        groups.set("系统提示", (groups.get("系统提示") || 0) + c.length * 0.6);
+        groups.set("系统提示", (groups.get("系统提示") || 0) + countTokens(c));
       }
     }
     const rows = [...groups.entries()].map(([name, chars]) => ({

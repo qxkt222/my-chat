@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Users,
@@ -27,13 +28,14 @@ import { ContextViewer } from "@/components/tavern/ContextViewer";
 import { QuickReplyBar } from "@/components/chat/QuickReplyBar";
 import { MemoryGraphPanel } from "@/components/tavern/MemoryGraphPanel";
 import { extractGraph } from "@/lib/memory-graph";
+import { lastAssistantIndex } from "@/lib/message-selectors";
 import { filterCharacters, groupConversationsByCharacter } from "./selectors";
 import { useT } from "@/lib/i18n";
 import { detectEmotion, emotionImagePath, emotionImageExists } from "@/lib/emotion";
 import { showToast } from "@/components/ui/Toast";
 import { askPrompt } from "@/components/ui/ConfirmDialog";
 import { MessageBubble } from "@/components/chat/MessageBubble";
-import type { Message } from "@/types";
+import type { CharacterBook, Message } from "@/types";
 
 interface Props {
   onOpenSettings: () => void;
@@ -66,15 +68,18 @@ export function TavernView({ onOpenSettings }: Props) {
   const [varVal, setVarVal] = useState("");
   const [attName, setAttName] = useState("");
   const [attContent, setAttContent] = useState("");
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const msgRefs = useRef<Record<string, HTMLElement | null>>({});
   /** 表情图文件不存在的消息 id 集合(破图回退角色头像) */
   const [brokenEmo, setBrokenEmo] = useState<Set<string>>(new Set());
 
   // 启动加载 tavern 会话(角色卡已在 App 启动加载)
+  // 依赖必须是稳定的动作引用:整店对象 `tavern` 每次 set 都是新引用,
+  // 依赖它会让 effect 随重渲染无限重跑(见 store 内的 load 幂等守卫)。
+  const loadTavern = useTavernStore((s) => s.load);
   useEffect(() => {
-    void tavern.load();
-  }, [tavern]);
+    void loadTavern();
+  }, [loadTavern]);
 
   // 群聊/世界书选择弹层 Escape 关闭(此前只能点遮罩或保存按钮)
   useEffect(() => {
@@ -98,32 +103,93 @@ export function TavernView({ onOpenSettings }: Props) {
     [tavern.conversations]
   );
 
-  const active = tavern.getActive();
+  // 直接用状态派生(而不是调 store 的动作),React Compiler 才能跟踪引用来源
+  const activeId = tavern.activeId;
+  const active = tavern.conversations.find((c) => c.id === activeId);
   const activeCard = active ? charStore.characters.find((c) => c.id === active.character_id) : null;
   const activePersona = active
     ? charStore.personas.find((p) => p.id === active.persona_id) || null
     : null;
   const model = models.find((m) => m.name === activeModel);
 
-  // 自动滚动到底部
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [active?.messages.length, tavern.isStreaming]);
+  // 最后一条 assistant 的下标(审计 SRC-03):渲染前算一次 O(n),
+  // 替代 map 内每行 `messages.slice(mi + 1).every(...)` 的 O(n²)。
+  const lastAssistantIdx = active ? lastAssistantIndex(active.messages) : -1;
+  // 用选择器取「消息条数」这个稳定原始值:避免从 find 结果派生后作为 memo 依赖
+  // (React Compiler 会认为 find 返回的对象可能被后续修改,拒绝保留手写 memo)
+  const activeMsgCount = useTavernStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.messages.length ?? 0
+  );
+
+  // 上下文查看器 / 记忆图谱的派生数据用 useMemo 包起来(审计 SRC-03):
+  // 此前 lorebook 数组在 JSX 里新建、extractGraph 在渲染期跑,流式每帧都重算。
+  // 只在打开上下文面板时才解析 Persona 回退(getActivePersona 有副作用成本,
+  // 且未打开面板时这个值没人用)
+  const personaForContext = showContext
+    ? activePersona || charStore.getActivePersona() || null
+    : activePersona;
+  // 世界书 id 的合并结果以「拼接后的字符串」作缓存键:流式期间 join 出的字符串
+  // 不变 → useMemo 不重算(审计 SRC-03 建议的 lorebookIds.join() 形式)。
+  const lorebookIdsKey = [
+    ...charStore.enabledLorebookIds,
+    ...(personaForContext?.lorebookIds ?? []),
+    ...(active?.lorebookIds ?? []),
+    ...(activeCard?.lorebookIds ?? []),
+  ].join("|");
+  const mergedLorebookIds = useMemo(
+    () => (lorebookIdsKey ? lorebookIdsKey.split("|") : []),
+    [lorebookIdsKey]
+  );
+  const contextLorebooks = useMemo(() => {
+    const card = charStore.characters.find((c) => c.id === activeId) ?? null;
+    return [
+      charStore.globalLorebook,
+      card?.character_book,
+      ...mergedLorebookIds.map((id) => charStore.lorebooks[id]),
+    ].filter((b): b is CharacterBook => !!b);
+  }, [
+    activeId,
+    mergedLorebookIds,
+    charStore.globalLorebook,
+    charStore.lorebooks,
+    charStore.characters,
+  ]);
+
+  // 记忆图谱:只在面板打开时计算;消息条数变化才重算(流式内容增长不重跑)
+  const graph = useMemo(() => {
+    if (!showGraph || !activeId) return null;
+    // 用 getState 读当前快照:避免把 active 放进依赖(它每 token 换新对象)
+    const cur = useTavernStore.getState().getActive();
+    if (!cur) return null;
+    const card = charStore.characters.find((c) => c.id === cur.character_id);
+    return extractGraph(
+      cur.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })),
+      card?.character_book?.entries.map((e) => e.content).join("\n") || "",
+      30
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 以 activeId/条数作变更键,避免每 token 重算
+  }, [showGraph, activeId, activeMsgCount, charStore.characters]);
 
   // 异步校验:检测到表情但文件不存在(如酒馆卡带 emotions 却没上传表情图)的消息,
-  // 标记为回退角色头像——此前直接渲染 asset:// 不存在路径导致头像全破
+  // 标记为回退角色头像——此前直接渲染 asset:// 不存在路径导致头像全破。
+  // 依赖收窄(审计 SRC-04):不再依赖 active 对象(流式每 token 换新引用),
+  // 只在切换会话 / 消息条数变化 / 角色卡变化 / 流式起止时重跑;
+  // emotionImageExists 自身有进程内缓存,重复批次不会重复读盘。
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       const broken = new Set<string>();
-      const cur = active;
-      if (!cur) return;
+      const cur = useTavernStore.getState().getActive();
+      if (!cur) {
+        if (!cancelled) setBrokenEmo(new Set());
+        return;
+      }
+      const chars = charStore.characters;
+      const curCard = chars.find((c) => c.id === cur.character_id) ?? null;
       for (const m of cur.messages) {
         if (m.role !== "assistant") continue;
         const card =
-          (cur.groupCharIds?.length || 0) >= 2
-            ? charStore.characters.find((c) => c.name === m.model)
-            : activeCard;
+          (cur.groupCharIds?.length || 0) >= 2 ? chars.find((c) => c.name === m.model) : curCard;
         if (!card) continue;
         const emo = detectEmotion(m.content, card);
         const emoPath = emo ? emotionImagePath(card, emo) : null;
@@ -135,16 +201,31 @@ export function TavernView({ onOpenSettings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [active, activeCard, charStore.characters]);
+    // 流式结束(isStreaming 翻转)再跑一次:最后一条消息的内容在这一刻才定型,
+    // 条数不变,不能只靠 length。isStreaming 只在起止各变一次,不是每 token。
+  }, [activeId, activeMsgCount, charStore.characters, tavern.isStreaming]);
 
   // 记忆图谱点击跳转:滚动到对应消息并高亮闪烁(此前 onJump 只关面板,跳转是假的)
   const jumpToMessage = (msgId: string) => {
     setShowGraph(false);
-    const el = msgRefs.current[msgId];
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.classList.add("bg-primary/10");
-    setTimeout(() => el.classList.remove("bg-primary/10"), 1800);
+    const idx = active?.messages.findIndex((m) => m.id === msgId) ?? -1;
+    if (idx < 0) return;
+    const flash = (el: HTMLElement) => {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("bg-primary/10");
+      setTimeout(() => el.classList.remove("bg-primary/10"), 1800);
+    };
+    const mounted = msgRefs.current[msgId];
+    if (mounted) {
+      flash(mounted);
+      return;
+    }
+    // 虚拟化后目标行可能不在 DOM 中:先滚到该行,等它挂载后再高亮
+    virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior: "smooth" });
+    setTimeout(() => {
+      const el = msgRefs.current[msgId];
+      if (el) flash(el);
+    }, 150);
   };
 
   // 消息编辑:弹输入框,改后落盘到 tavern/{id}.json
@@ -716,10 +797,21 @@ export function TavernView({ onOpenSettings }: Props) {
                   </div>
                 )}
 
-                {/* 消息区 */}
-                <div ref={scrollRef} className="flex-1 overflow-y-auto">
-                  <div className="max-w-3xl mx-auto px-4 py-3 space-y-3">
-                    {active.messages.map((m, mi) => {
+                {/* 消息区:虚拟化(只渲染可见行)+ followOutput 流式自动滚动(审计 SRC-03)。
+                    key=会话 id:切换会话时重挂载并直接定位到最后一条。 */}
+                <div className="flex-1 min-h-0">
+                  <Virtuoso
+                    key={active.id}
+                    ref={virtuosoRef}
+                    data={active.messages}
+                    computeItemKey={(_, m) => m.id}
+                    initialTopMostItemIndex={{
+                      index: Math.max(0, active.messages.length - 1),
+                      align: "end",
+                    }}
+                    followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
+                    increaseViewportBy={200}
+                    itemContent={(mi, m) => {
                       // 群聊:按消息角色名解析头像/显示名;单角色:会话级
                       const isGroup = (active.groupCharIds?.length || 0) >= 2;
                       const charCard = isGroup
@@ -729,10 +821,9 @@ export function TavernView({ onOpenSettings }: Props) {
                         ? charCard?.name || m.model || active.character_name
                         : active.character_name;
                       // 重新生成(酒馆语义):仅最后一条 assistant 支持重放——此前硬编码
-                      // 工作模式 useChatStore.regenerate 导致酒馆点它静默失效
-                      const isLastAssistant =
-                        m.role === "assistant" &&
-                        active.messages.slice(mi + 1).every((x) => x.role !== "assistant");
+                      // 工作模式 useChatStore.regenerate 导致酒馆点它静默失效。
+                      // 下标在渲染前算好(O(n)),这里只做整数比较。
+                      const isLastAssistant = m.role === "assistant" && mi === lastAssistantIdx;
                       // 表情图片:assistant 完成回复按情绪关键词命中切换(未命中回退角色头像);
                       // 表情图文件不存在(未上传)时同样回退角色头像,避免破图
                       let charAvatar = avatarOf(charCard?.avatarPath);
@@ -747,51 +838,55 @@ export function TavernView({ onOpenSettings }: Props) {
                         if (emoPath) charAvatar = avatarOf(emoPath);
                       }
                       return (
-                        <div
-                          key={m.id}
-                          ref={(el) => {
-                            msgRefs.current[m.id] = el;
-                          }}
-                          className="transition-colors rounded"
-                        >
-                          <MessageBubble
-                            message={m}
-                            rpCharName={charName}
-                            rpCharAvatar={charAvatar}
-                            rpUserName={activePersona?.name}
-                            rpUserAvatar={avatarOf(activePersona?.avatarPath)}
-                            onTranslate={(msg) => tavern.translateMessage(active.id, msg.id)}
-                            translating={tavern.translatingIds.includes(m.id)}
-                            onSwipe={(msg, dir) => tavern.swipe(msg.id, dir)}
-                            onRetry={
-                              isLastAssistant
-                                ? (msg) => void tavern.swipeGenerate(msg.id)
-                                : undefined
-                            }
-                            onContinue={
-                              isLastAssistant
-                                ? (msg) => void tavern.continueMessage(msg.id)
-                                : undefined
-                            }
-                            onEdit={editMessage}
-                          />
+                        <div className="max-w-3xl mx-auto px-4 py-1.5">
+                          <div
+                            ref={(el) => {
+                              msgRefs.current[m.id] = el;
+                            }}
+                            className="transition-colors rounded"
+                          >
+                            <MessageBubble
+                              message={m}
+                              rpCharName={charName}
+                              rpCharAvatar={charAvatar}
+                              rpUserName={activePersona?.name}
+                              rpUserAvatar={avatarOf(activePersona?.avatarPath)}
+                              onTranslate={(msg) => tavern.translateMessage(active.id, msg.id)}
+                              translating={tavern.translatingIds.includes(m.id)}
+                              onSwipe={(msg, dir) => tavern.swipe(msg.id, dir)}
+                              onRetry={
+                                isLastAssistant
+                                  ? (msg) => void tavern.swipeGenerate(msg.id)
+                                  : undefined
+                              }
+                              onContinue={
+                                isLastAssistant
+                                  ? (msg) => void tavern.continueMessage(msg.id)
+                                  : undefined
+                              }
+                              onEdit={editMessage}
+                            />
+                          </div>
                         </div>
                       );
-                    })}
-                    {tavern.isStreaming && (
-                      <div className="flex items-center gap-1 text-muted-foreground text-sm px-1">
-                        <span className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full" />
-                        <span
-                          className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full"
-                          style={{ animationDelay: "0.2s" }}
-                        />
-                        <span
-                          className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full"
-                          style={{ animationDelay: "0.4s" }}
-                        />
-                      </div>
-                    )}
-                  </div>
+                    }}
+                    components={{
+                      Footer: () =>
+                        tavern.isStreaming ? (
+                          <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-1 text-muted-foreground text-sm">
+                            <span className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full" />
+                            <span
+                              className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full"
+                              style={{ animationDelay: "0.2s" }}
+                            />
+                            <span
+                              className="animate-pulse-dot w-1.5 h-1.5 bg-primary rounded-full"
+                              style={{ animationDelay: "0.4s" }}
+                            />
+                          </div>
+                        ) : null,
+                    }}
+                  />
                 </div>
 
                 {/* 输入区 */}
@@ -1006,26 +1101,9 @@ export function TavernView({ onOpenSettings }: Props) {
           {showContext && active && activeCard && (
             <ContextViewer
               card={activeCard}
-              persona={
-                charStore.personas.find((p) => p.id === active.persona_id) ||
-                charStore.getActivePersona() ||
-                null
-              }
+              persona={personaForContext}
               preset={charStore.presets}
-              lorebooks={
-                [
-                  charStore.globalLorebook,
-                  activeCard.character_book,
-                  ...[
-                    ...charStore.enabledLorebookIds,
-                    ...(charStore.personas.find((p) => p.id === active.persona_id)?.lorebookIds ||
-                      charStore.getActivePersona()?.lorebookIds ||
-                      []),
-                    ...(active.lorebookIds || []),
-                    ...(activeCard.lorebookIds || []),
-                  ].map((id) => charStore.lorebooks[id]),
-                ].filter((b) => !!b) as NonNullable<typeof activeCard.character_book>[]
-              }
+              lorebooks={contextLorebooks}
               recentMessages={active.messages}
               currentInput={input}
               summary={active.summary}
@@ -1034,17 +1112,10 @@ export function TavernView({ onOpenSettings }: Props) {
           )}
 
           {/* 记忆图谱(33):从消息+世界书提取关系图,树形连线,点击节点跳转消息 */}
-          {showGraph && active && (
+          {showGraph && active && graph && (
             <div className="px-4 py-2 border-b border-border bg-card/60 shrink-0">
               <div className="max-w-3xl mx-auto">
-                <MemoryGraphPanel
-                  graph={extractGraph(
-                    active.messages.map((m) => ({ id: m.id, role: m.role, content: m.content })),
-                    activeCard?.character_book?.entries.map((e) => e.content).join("\n") || "",
-                    30
-                  )}
-                  onJump={jumpToMessage}
-                />
+                <MemoryGraphPanel graph={graph} onJump={jumpToMessage} />
               </div>
             </div>
           )}

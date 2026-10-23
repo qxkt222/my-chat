@@ -64,7 +64,7 @@ fn hash_str(s: &str) -> usize {
 
 /// Call `OpenAI` embeddings API
 async fn openai_embed(text: &str, api_key: &str, model: &str) -> Result<Vec<f32>, String> {
-    let client = reqwest::Client::new();
+    let client = crate::net::client();
     let body = serde_json::json!({
         "model": model,
         "input": text,

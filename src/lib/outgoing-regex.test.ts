@@ -7,7 +7,12 @@
 // 用例直接采用那几条脚本的**真实 findRegex**，不是自造的近似正则。
 
 import { describe, it, expect } from "vitest";
-import { applyOutgoingRegex, depthAllows, activeOutgoingCount } from "./outgoing-regex";
+import {
+  applyOutgoingRegex,
+  depthAllows,
+  activeOutgoingCount,
+  prepareOutgoingMessages,
+} from "./outgoing-regex";
 import { appliesToDisplay, appliesToPrompt } from "./regex-format";
 import type { RegexRule } from "./regex-format";
 import type { Message } from "@/types";
@@ -174,6 +179,60 @@ describe("安全与边界", () => {
     const msgs = [msg("user", "abc")];
     expect(applyOutgoingRegex(msgs, [])).toBe(msgs);
     expect(applyOutgoingRegex(msgs, [outRule({ placement: [1] })])).toBe(msgs);
+  });
+});
+
+describe("prepareOutgoingMessages（三条发送链路共用的发送前准备）", () => {
+  const tagRule = outRule({
+    pattern: "\\s*<internal_states>[\\s\\S]*?</internal_states>",
+    replacement: "",
+    flags: "g",
+  });
+
+  it("先收缩再清出站标记，且原消息对象不被修改", () => {
+    const original: Pick<Message, "role" | "content">[] = [
+      msg("user", "旧 <internal_states>1</internal_states>"),
+      msg("assistant", "新 <internal_states>2</internal_states>"),
+    ];
+    const result = prepareOutgoingMessages(original, {
+      budget: 100000,
+      mode: "manual",
+      regexRules: [tagRule],
+    });
+    expect(result.messages[0]?.content).toBe("旧");
+    expect(result.messages[1]?.content).toBe("新");
+    // 原数组/原消息必须原样保留（界面显示不受影响）
+    expect(original[0]?.content).toContain("<internal_states>");
+    expect(original[1]?.content).toContain("<internal_states>");
+    // 预算是收缩器的输出，regex 不改统计口径
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.budget).toBe(100000);
+  });
+
+  it("没有出站规则时保持 shrinkMessages 的既有语义（manual 模式不砍）", () => {
+    const original = [msg("user", "a"), msg("assistant", "b")];
+    const result = prepareOutgoingMessages(original, {
+      budget: 1,
+      mode: "manual",
+      regexRules: [],
+    });
+    expect(result.messages).toBe(original);
+    expect(result.over).toBe(true);
+    expect(result.messages).toHaveLength(2);
+  });
+
+  it("规则仍然受 minDepth/maxDepth 约束（酒馆语义不变）", () => {
+    const msgs = [
+      msg("user", "最旧 <internal_states>1</internal_states>"),
+      msg("assistant", "最新 <internal_states>2</internal_states>"),
+    ];
+    const result = prepareOutgoingMessages(msgs, {
+      budget: 100000,
+      mode: "manual",
+      regexRules: [{ ...tagRule, minDepth: 1 }],
+    });
+    expect(result.messages[0]?.content).not.toContain("internal_states"); // depth=1
+    expect(result.messages[1]?.content).toContain("internal_states"); // depth=0
   });
 });
 

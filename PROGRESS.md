@@ -2,7 +2,7 @@
 
 > 归档日期：2026-08-12
 > 参考项目：Cherry Studio（主参考）、Chatbox（辅助优化）
-> 最近更新：2026-08-13（全面维修轮：原生弹窗/插件接线/代码分割/酒馆断裂/酒馆机制补齐）
+> 最近更新：2026-10-23（全项目体检与修复，见 §7.12；历史轮次见 §7.1–§7.11）
 
 ---
 
@@ -75,9 +75,9 @@
 
 ## 一、项目概况
 
-- **技术栈**：Tauri 2（Rust 后端）+ React 18 + TypeScript + Zustand + Tailwind + Sled（嵌入式 KV 存储）
+- **技术栈**：Tauri 2（Rust 后端）+ **React 19.3** + TypeScript 5.9 + Zustand 5 + Tailwind 4 + Vite 8 + Sled（嵌入式 KV 存储）——具体版本见 §7.3 与 `README.md`
 - **定位**：本地多模型 AI 聊天客户端（自用，不外发）
-- **数据目录**：`%APPDATA%\com.my-chat\`（conversations / skills / knowledge / adapters / sled_db）
+- **数据目录**：`%APPDATA%\com.my-chat\`（`conversations` / `skills` / `knowledge` / `adapters` / `characters` 含 `avatars` / `presets` / `lorebooks` / `tavern` / `simulation` / `generated` / `sled_db`）
 - **启动方式**：
   - 独立版（前端已打包，推荐）：`src-tauri\target\release\my-chat.exe` 双击运行
   - 开发版：`npm run tauri dev`（依赖 vite dev server 1420 端口）
@@ -210,7 +210,9 @@
 - **Q4 删除确认 + 空状态**：删会话前 confirm；搜索/无结果文案区分
 - **Q5 i18n 全量迁移**：约 20 组件 150+ 条字符串迁入 i18n.ts（zh/en）；`useT()` 改 `useCallback` 稳定引用不破坏 memo
 
-### V0.4 角色扮演（2026-08-12 第 5 轮，酒馆 SillyTavern 兼容）- **会话重置**：工具栏「清空会话」——清空当前对话消息、上下文归零、标题复位（confirm 确认），解决"重置变追加"的困惑
+### V0.4 角色扮演（2026-08-12 第 5 轮，酒馆 SillyTavern 兼容）
+
+- **会话重置**：工具栏「清空会话」——清空当前对话消息、上下文归零、标题复位（confirm 确认），解决"重置变追加"的困惑
 - **角色卡系统**：`characters/{id}.json` + `characters/avatars/{id}.png`；V1（扁平 6 字段）/ V2（`spec:chara_card_v2` + data）/ V3 解析兼容；编辑器全字段（名称/描述/性格/场景/开场白/备用开场白/示例对话/系统提示词/后置指令/标签/内嵌世界书）
 - **PNG 导入导出**：Rust `read_file_bytes/write_file_bytes`（base64 二进制通道）；前端字节级解析——找**第一个**魔数（修复 JSON 内部 spec 字符串误命中），魔数前=头像原图，魔数后=JSON；无魔数回退扫 PNG tEXt 块（keyword=`chara`）；导出 JSON（spec 包裹）/ PNG（头像+魔数+JSON）
 - **Persona（用户自己的角色扮演）**：多 Persona（名称+描述+头像），`{{user}}` 宏 = 激活 Persona 名；描述块 `You are {name}. {desc}` 注入 system_prompt（模板含 `{{persona}}` 时经模板，否则追加尾部，与 knowledge 尾部错开保缓存前缀）；角色卡一键「转为人设」（取 name+description）；会话级 persona_id，未绑定用全局激活
@@ -700,7 +702,8 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 - 补 `bundle.icon` 后打包成功，**产出两个安装包**（首次）：
   - `target/release/bundle/msi/My Chat_0.2.0_x64_en-US.msi` — 4.82 MiB
   - `target/release/bundle/nsis/My Chat_0.2.0_x64-setup.exe` — 3.45 MiB
-  - `my-chat.exe` — 13.13 MiB（mtime 与本轮构建一致）
+  - `my-chat.exe` — 13.13 MiB（**2026-09-25 本轮构建时的读数**；升级 `pdf-extract`/`lopdf` 后
+    实测为 **13.37 MiB**，见 §7.11.3。引用体积时务必带上日期与构建批次）
   - `target/` 已被 `.gitignore` 覆盖（`git check-ignore` 实测 exit 0），产物不会误入库。
 - **release-only 警告**：`#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` 原先挂在
   `fn main` 上，rustc 报 `unused_attributes`（它作用于函数而非 crate，实际不生效）。
@@ -712,21 +715,40 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 
 #### 7.11.5 覆盖率（此前无此能力）
 
-`@vitest/coverage-v8` 本轮才装。实测（25 个文件）：
+`@vitest/coverage-v8` 本轮才装。
+
+> ⚠️ **本节 2026-10-23 订正**：初版把 `coverage-summary.json` 的 `total` 当成了全局覆盖率
+> （当时读到 `lines 60.46%`），并据此把阈值设成 `lines 58 / statements 56 / functions 47 / branches 50`。
+> 这是**错误口径**，下面重写。
+
+**两个口径不是同一个量**：
+
+| 口径 | 分母 | 2026-09-25 实测 |
+|---|---|---|
+| 控制台 `All files` 行 | **全部源文件**（0% 的也计入）| stmts 21.35 / branch 15.88 / funcs 12.79 / lines 22.6 |
+| `coverage-summary.json` 的 `total` | 只含**至少有一条覆盖记录**的文件（25 个）| lines 60.46 —— 高 33 个点 |
+
+更糟的是当时读到的 JSON 还是前一晚 23:49 的旧文件（当天根本没更新）：
+`vite root: "src"` 让报告写进 `src/coverage/`，仓库根那份长期是旧件。
+两个错误叠加，才有了 58/56/47/50 这组从未成立过的阈值。
+
+**当前实际值**（`vite.config.ts` → `test.coverage.thresholds`，与 `scripts/gate.mjs`
+的 `assert-coverage` 的 `floors` 保持一致）：
 
 ```
-lines 60.46% · statements 58.55% · functions 49.6% · branches 52%
-最低：lib/tauri.ts 1.6%（纯 IPC 转发，单测天然覆盖不到）· useAppConfigStore.ts 16.66% · character-card.ts 29.48%
+lines 23 · statements 22 · functions 13 · branches 17
 ```
 
-阈值（`vite.config.ts` → `test.coverage.thresholds`）按实测**下留约 2 点**设为
-`lines 58 / statements 56 / functions 47 / branches 50`：**这是地板不是目标**，
-作用是拦断崖式倒退，不是把门焊死；要提高得先补测试再抬阈值，顺序不能反。
-`assert-coverage` 另独立复核四项读数（只看退出码的话，阈值被谁删掉都没人发现）。
+这组是**地板不是目标**，作用只在拦断崖式倒退（比如有人删掉一批测试、或把大模块从统计里摘出去），
+不宣称覆盖率好看。要提高得先补测试再抬阈值，顺序不能反。
 
-⚠️ **同一份覆盖率的两个读数（已实测，不是 bug）**：控制台 `All files` 行报 `branches 52.24`，
-而 `coverage-summary.json` 报 `52`（istanbul 经典口径 `covered/total = 440/846 = 52.0046` 被 floor）。
-断言**故意**读结构化 JSON（字段稳定、可编程读，不依赖表格排版），代价是比控制台低不到 1 个点。
+**断言怎么读**：`assert-coverage` **只读控制台 `All files` 那一行**，不读 JSON
+（原文「断言故意读 JSON」与代码相反，已订正）。2026-10-23 起 `vite.config.ts` 显式设
+`reportsDirectory: "../coverage"`，让 json-summary 与控制台落在同一份数据上，
+但断言口径不变——仍以控制台为准。
+
+**2026-10-23 本轮实测**：stmts **34.88%** / branch **29.96%** / funcs **25.7%** / lines **36.24%**
+（分母为全部源文件；本轮补了大量测试与组件用例后抬升）。
 
 #### 7.11.6 空消息守卫（来自一次真实用户报错）
 
@@ -905,9 +927,14 @@ Freaky 预设被 `preset-import.ts` 压平成一行一条），而唯一那张�
   断言：25 条全导入、placement 分布 25/2、不再被误判成角色卡、出站剥净而显示不受影响
 - 合成数据（3 条）**没能**暴露这个问题 —— 所以留了这条真实文件回归
 
-**测试**：前端 142 → 169 用例（新增 `outgoing-regex.test.ts` 19 条、
-`real-suite-check.test.tsx` 5 条，并把 `regex-import.test.ts` 的旧断言
-「promptOnly 应被跳过」反过来改为「应被导入」）。
+**测试**：前端 142 → 169 用例。算术拆开（此前漏记了第三项，对不上账）：
+
+| 来源 | 增量 |
+|---|---|
+| 新增 `outgoing-regex.test.ts` | +19 |
+| 新增 `real-suite-check.test.tsx`（5 条，依赖本机文件，缺失时整组 skip）| +5 |
+| `regex-import.test.ts` 21 → 24（旧断言「promptOnly 应被跳过」反过来改为「应被导入」，并补用例）| +3 |
+| **合计** | **+27 → 169** |
 
 #### 7.11.10 三个面板的常驻返回（吸顶头，2026-09-25）
 
@@ -949,11 +976,129 @@ Freaky 预设被 `preset-import.ts` 压平成一行一条），而唯一那张�
 
 `gate all` 序列现为 **7 道**：`typecheck → lint → format → rustfmt → test → coverage → build`，
 外加 `assert-*` 行为型断言（git / tests / lint / format / rustfmt / coverage / build）。
-完整回归实测：**exit 0，前端 72/72 用例**。
+`gate.mjs` 的 `GATES` 一共 **18 个条目**：上述 7 道 + 7 道 `assert-*` + Rust 三道
+（`rust-check` / `rust-test` / `rust-clippy`）+ `all` 汇总入口。
+
+完整回归实测（2026-09-25 当轮）：**exit 0，前端 172 用例 = 167 过 + 5 跳过**。
+（原文写「72/72」是笔误——当轮 §7.11.10 已记到 172。**2026-10-23 最新读数**为
+287 passed / 5 skipped / 292 total，见 §7.12。）
 
 **本轮所有读数来源**：`gate.mjs` 各闸门、`cargo build --release`、`tauri build`、
 `npm audit`（官方 registry）、`cargo audit`（本地 RustSec 库）、`cargo tree -i`、
-二进制字节级扫描、`coverage-summary.json`、`node fs.*` 直读盘面、
-以及启动产物后的 `startup.marker` / `chat_errors.log`。
+二进制字节级扫描、vitest 控制台 `All files` 行（**不是** `coverage-summary.json`，见 §7.11.5 订正）、
+`node fs.*` 直读盘面，以及启动产物后的 `startup.marker` / `chat_errors.log`。
 **未跑**：`npm outdated` 全量升级评估、跨平台构建、安装包安装后行为 —— 本轮不做，如实记未跑。
+
+---
+
+### 7.12 全项目体检与修复（2026-10-23，四路只读审计 → 分批修复）
+
+> **体检方式**：四路并行**只读**审计（门禁 / 前端 / 后端 / 文档）+ 工头复核关键项。
+> **发现**：审计报告记 P0 **1 个**（SRC-01）、P1 20 余个、P2 若干；另查出闸门本身 3 处"假绿"。
+> **修复期间复核又确认 1 个同级缺陷**（工作模式漏发当前输入），故下文按 2 个 P0 级缺陷处理。
+> 原始报告在仓库外：`<sandbox>\my-chat-audit-20261023\SUMMARY.md`。
+> 本轮改动位于分支 `audit-fixes-20261023`（`git diff --stat` 实测 **50 files, +3368 / −922**）。
+
+#### 7.12.1 本轮终态读数（全部当场实测）
+
+| 项 | 读数 |
+|---|---|
+| 前端测试 | **287 passed / 5 skipped / 292 total**；35 个测试文件（34 过 / 1 跳过）|
+| Rust 测试 | **90 passed / 0 failed** |
+| `clippy -- -D warnings` / `fmt --check` | 0 警告 / 0 diff |
+| 覆盖率（控制台 `All files` 口径，全源文件为分母）| stmts **34.88%** / branch **29.96%** / funcs **25.7%** / lines **36.24%** |
+| 门禁基线 | `minTests=180`、`maxSkippedTests=5`、`trackedFiles=280`、覆盖率地板 **22/17/13/23** |
+
+5 条跳过用例**全部**来自 `src/lib/real-suite-check.test.tsx`，依赖本机
+`<home>/Downloads/Compressed/FF5 Regex 3.0 Suite.json`；文件不存在时整组 skip。
+这是**已知缺口**：已用 `maxSkippedTests` 钉死上限，不再允许静默增长（旧闸门只查 failed=0）。
+
+#### 7.12.2 止血（2 个 P0 级缺陷 + 1 个 P1）
+
+- **工作模式当前用户输入未进入待发消息（P0）**：`useChatStore.sendMessage` 组装 `messages` 时
+  只从 `conv.messages`（旧历史）取，新输入的那句**从未 push 进去** —— 每轮真正发给模型的内容缺当前问题。
+  修复：在历史之后、知识库/摘要尾段之前补一条 `role: "user"`；`skipUserAppend`（重新生成）不重复追加。
+  内容用 `processedContent`（插件 `beforeSend` 之后），不是原始输入。
+- **Tavern / Simulation `load()` 无限重载**：整店订阅 + `useEffect(..., [store])`，而 `load()` 无条件
+  `set(...)` 造新对象 → 挂载即反复读盘（审计期最小复现：500ms 内调 34 次），流式期间还会用磁盘数据覆盖内存。
+  修复：store 加 `loaded` 守卫（成功或失败过一次就不再重试），依赖改 `[load]`。
+- **上下文预算下标错位**：`shrinkMessages` 过滤后数组位移，却仍拿**原始下标**判断 → 砍错段
+  （该砍世界书却砍了历史，且静默删除不生成摘要）。修复：全程只在原始下标上记账（`removed: Set<number>`），
+  循环结束后一次性过滤；**没有可用摘要时保留历史**，绝不静默删光（超限由 `over` 标记交给 UI 提醒）。
+
+#### 7.12.3 安全
+
+- **MCP 权限三态**：未配置 / 显式 `ask` → 弹窗询问，**60s 无响应按拒绝处理**（不再 fail-open 放行）；
+  `deny` 直接拒。审计日志键改为「13 位毫秒 + 6 位序号 + 工具名」，同毫秒多条不再互相覆盖。
+- **敏感 KV 加密 + 惰性迁移**：`connection_profiles` / `*_key` / `*_secret` / `*_token` / `*_password`
+  保存时强制 DPAPI 加密（失败返回 `Err`，不回落明文）；旧明文在**首次读取该键时**就地重写为密文。
+- **CSP / asset scope**：`csp: null` 改为显式策略（`default-src 'self'`、`object-src 'none'`、
+  `frame-ancestors 'none'` 等，`devCsp` 单独放宽 HMR）；`assetProtocol.scope` 从 `["**"]`
+  收窄到 `characters/avatars/**` 与 `generated/**`。
+- **读文件约束**：`read_file` / `read_file_bytes` / 文档解析统一 `MAX_READ_BYTES = 50 MiB`；
+  读路径准入 = **应用数据目录内，或持有未过期的对话框令牌**（`READ_TOKEN_TTL = 10 分钟`），
+  其余一律拒绝。
+- **`guard_path` 联接绕过**：改为 canonicalize「最近存在的祖先」再与根比对（解掉符号链接 / 目录联接），
+  写入后再 canonicalize 复核一次，越界即删。
+- **备份恢复校验**：要求目录名以 `my-chat-backup-` 开头、内含 `sled_db` 或 `schema_version.txt`、
+  且不是应用数据目录本身；恢复前自动快照，保护性快照只保留最新 **3** 份（`PRE_RESTORE_KEEP`）。
+- **WebDAV**：只接受 `https://`（Basic 认证不走明文），单次上传总量上限 **2 GiB**。
+
+#### 7.12.4 网络 / 流式
+
+- **统一 HTTP 客户端**（`src-tauri/src/net.rs`）：连接 10s、非流式总超时 120s、**不跟随重定向**
+  （避免 `Authorization` 头被 3xx 带到别的主机）；图片 300s、上传无总超时。
+- **首字节 180s + 空闲 60s**：SSE 第一片单独 180s（冷启动 / 排队 / 长 prefill），后续相邻两片 60s。
+- **等响应头超时**：`send()` 挂起同样纳入首字节 180s，不再出现"请求已发但永远等不到头"。
+- **UTF-8 分片缓冲**：`SseLineBuffer` 按字节缓冲、凑齐完整行再解码，中文跨 chunk 不再出现 `�`。
+
+#### 7.12.5 数据层
+
+- **chunk 死循环钳制**：`clamp_chunk_params` 把 `chunk_size` 钳到 `[1, MAX]`、`overlap ≤ chunk_size-1`，
+  步长恒 ≥1；命令层与内部分块入口双重兜底。
+- **索引原子性**：先把整篇文档的 embedding 全部算完（任一块失败直接返回，旧索引一字节未动），
+  成功后才删旧分块并写入。
+- **迁移降级拒绝**：数据库 schema 版本**高于**本程序支持版本时直接报错，不允许旧程序静默打开新库。
+- **退出 flush**：`RunEvent::Exit` 时调用 sled `flush()`，不再依赖定时落盘。
+- **id 键校验**：会话 / 消息 id 在拼 sled 键之前校验，非法 id 直接拒绝，避免歧义键与碰撞。
+
+#### 7.12.6 前端
+
+- **出站正则三模式统一**：`prepareOutgoingMessages`（预算收缩 → 出站正则清理，只作用于待发副本）
+  接入工作 / 酒馆 / 推演。酒馆四条发送链路中三条接入；**续写有意保留旧行为**（只做预算收缩，
+  注明"改动会改变对外行为"）。
+- **摘要器三合一**：`lib/summarize.ts` 的 `runSummarize` 成为唯一实现（此前三处 store 各复制一份，
+  且 `onError: () => resolve()` 吞错后可能把半截摘要持久化）。新契约返回 `{ summary, complete }`，
+  调用方必须 `complete === true && summary.trim()` 才允许落盘；失败统一走 `logDiag`。
+- **`model_config` 去重**：新增 `lib/model-config.ts` 作为唯一构造点。HEAD 时 store 内有 **12 处**
+  手写 `model_config: {...}`，现收敛为 9 个 store 调用点 + 摘要器 1 个（3 处随重复发送分支合并而消失）；
+  另有 3 处非发送热路径（设置页助手 / 内置摘要插件 / 翻译工作区）保持内联。
+- **rAF 合帧共享**：`lib/stream-batcher.ts` 抽成与 store 无关的纯实现，工作 / 酒馆 / 推演三处共用
+  （此前工作模式有、酒馆与推演每个 token 直接 set）。
+- **酒馆虚拟化**：消息列表接入 `react-virtuoso`，流式期间不再全量重渲染。
+- **表情缓存**：`emotion.ts` 加进程内 `existsCache`，不再每条消息每帧 `readFile` 整个 PNG 判存在。
+- **持久化 sanitize**：`lib/persist-sanitize.ts` 在 JSON 解析边界做运行时校验（正则规则 / 预算配置 /
+  字符串数组 / 连接档案）；坏 `placement` 不再把消息区打成白屏。
+- **i18n 收口**：新增 20 个 key（输入占位符、发送/停止/重生成标题、6 类错误标题与提示、快捷键名等），
+  替换 `ChatInput` 等处的硬编码中英文。
+- **正则编译缓存**：`lib/regex-cache.ts` 按 `(pattern, flags)` 缓存编译结果，取用时重置 `lastIndex`；
+  显示 / 出站 / 世界书 / 设置预览四处共用（此前流式期间 N 条规则 × 每 token 重编译）。
+
+#### 7.12.7 门禁
+
+- `BASELINE.minTests` 34 → **180**（旧值下删掉 140 多条用例仍能绿灯）。
+- 新增 `maxSkippedTests = 5`：`assert-tests` 除 failed=0 外，还查跳过数超限并列名。
+- `trackedFiles` 基线更新为 **280**。
+- coverage `reportsDirectory` 显式指回仓库根 `coverage/`，避免再读到 `src/coverage/` 的旧件。
+- 覆盖率地板按控制台口径重设为 **22/17/13/23**（stmts/branch/funcs/lines），与 `vite.config.ts` 同源。
+
+#### 7.12.8 本轮未做 / 未验证
+
+**未做（有意留到后续）**：真机 GUI 冒烟、跨平台构建、`marked` 死依赖清理、`src/probe/` 死代码清理、
+store 进一步拆分、ReDoS 的 Worker 化、剩余 `JSON.parse(...) as X`（实测仍余 **28 处**，含 `sampler_presets`）。
+
+**真机未验证**（构建与单测层面通过，不代表实机行为）：
+- 酒馆虚拟化的实际滚动手感与长会话内存占用；
+- 新 CSP 在真实 WebView2 各页面（尤其设置弹窗、绘图工作区）是否引入白屏/资源加载失败；
+- 首字节 180s / 空闲 60s 的真实体感 —— 只有单测断言常量与文案，**没有**对着真挂起端点做端到端验证。
 

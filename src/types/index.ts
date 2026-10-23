@@ -1,4 +1,8 @@
 // ── Message ──────────────────────────────────────────────
+/** 错误分类（错误命名化）：与 lib/tauri.ts 的 classifyError 产出一一对应。
+ *  持久化边界读到陌生字符串时由 parseErrorKind 丢弃，不要用 `as` 硬塞。 */
+export type ErrorKind = "rate_limit" | "timeout" | "rejected" | "auth" | "overload" | "unknown";
+
 export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
@@ -14,7 +18,7 @@ export interface Message {
    *  kept separate from `content` so failures don't pollute the body */
   error?: string | undefined;
   /** 错误分类（错误命名化）：rate_limit / timeout / auth / overload / rejected / unknown */
-  errorKind?: string | undefined;
+  errorKind?: ErrorKind | undefined;
   /** 消息书签：长会话内标记关键消息，侧栏「书签」面板一键跳回 */
   bookmarked?: boolean | undefined;
   /** 酒馆模式内置翻译:AI 回复的中文/目标语言译文(独立于原文保存) */

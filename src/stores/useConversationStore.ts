@@ -17,6 +17,7 @@ import {
   dbBatchDeleteConvs,
 } from "@/lib/tauri";
 import { useCharacterStore } from "./useCharacterStore";
+import { parseErrorKind } from "@/lib/persist-sanitize";
 
 function generateId(): string {
   return crypto.randomUUID();
@@ -132,7 +133,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
             reasoning: m.reasoning || "",
             seq: m.seq ?? 0,
             error: m.error || "",
-            errorKind: m.error_kind || "",
+            // 后端/旧库里的陌生字符串不能 `as ErrorKind` 硬塞，否则渲染层按枚举分支会失准
+            errorKind: parseErrorKind(m.error_kind),
             bookmarked: m.bookmarked || false,
           })),
         }));
@@ -359,7 +361,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           ? {
               ...c,
               updated_at: nowISO(),
-              messages: c.messages.map((m) => (m.id === msgId ? { ...m, error, errorKind } : m)),
+              messages: c.messages.map((m) =>
+                m.id === msgId ? { ...m, error, errorKind: parseErrorKind(errorKind) } : m
+              ),
             }
           : c
       ),

@@ -63,8 +63,13 @@ export const shellMessages: Record<string, Record<string, string>> = {
   "shortcut.nextProvider": { zh: "下一个服务商", en: "Next provider" },
   "shortcut.prevProvider": { zh: "上一个服务商", en: "Previous provider" },
   "shortcut.nextSubModel": { zh: "下一个子模型", en: "Next sub-model" },
+  "shortcut.prevSubModel": { zh: "上一个子模型", en: "Previous sub-model" },
   // ── App ──
   "app.loading": { zh: "加载中...", en: "Loading..." },
+  "app.partialLoadFailed": {
+    zh: "部分数据未能加载，可在日志中查看详情",
+    en: "Some data failed to load — check the log for details",
+  },
   // ── Error ──
   "error.title": { zh: "出错了", en: "Something went wrong" },
   "error.reload": { zh: "重新加载", en: "Reload" },
