@@ -63,7 +63,7 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,15 +108,14 @@ const LINT_GLOB = "src/**/*.{ts,tsx}";
 
 const TMP = mkdtempSync(path.join(tmpdir(), "my-chat-gate-"));
 
-/** 解析 cargo:本机 bash 的 PATH 里没有 cargo,故优先 rustup 默认位置 */
+/** 解析 cargo:优先 $CARGO,其次 rustup 默认安装位置,最后退回 PATH 里的 cargo */
 function resolveCargo() {
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-  const candidates = [
-    process.env.CARGO,
-    home ? path.join(home, ".cargo", "bin", "cargo.exe") : null,
-    "<home>/.cargo/bin/cargo.exe",
-  ].filter(Boolean);
+  const bin = process.platform === "win32" ? "cargo.exe" : "cargo";
+  const candidates = [process.env.CARGO, path.join(homedir(), ".cargo", "bin", bin)].filter(
+    Boolean
+  );
   for (const c of candidates) if (existsSync(c)) return c;
+  // 前两者都不存在时才退回 PATH:交给 step() 执行,起不来会以 127 报错,不静默跳过
   return "cargo";
 }
 const CARGO = resolveCargo();

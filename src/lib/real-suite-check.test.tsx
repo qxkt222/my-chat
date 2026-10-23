@@ -9,7 +9,7 @@
 //   · 本项目没装 @types/node，所以 node:fs 的导入用 @ts-expect-error 放行
 //     （运行时由 vitest（Node）提供，没问题）
 //
-// 想换文件：只改下面的 REAL_FILE。
+// 想换文件：设 `MYCHAT_REAL_SUITE` 环境变量指向新文件（或改下面的 REAL_FILE 默认值）。
 
 import { describe, it, expect } from "vitest";
 import { parseTavernRegexSuite } from "./regex-import";
@@ -18,7 +18,18 @@ import { applyRegexRules } from "./regex-format";
 import { parseCharacterJson } from "./character-card";
 import type { Message } from "@/types";
 
-const REAL_FILE = "<home>/Downloads/Compressed/FF5 Regex 3.0 Suite.json";
+/** 未装 @types/node：os/path/process 没有全局类型，运行时由 Node 提供 */
+// @ts-expect-error 本项目未安装 @types/node，运行时由 Node 提供
+const osMod = (await import("node:os")) as { homedir: () => string };
+// @ts-expect-error 本项目未安装 @types/node，运行时由 Node 提供
+const pathMod = (await import("node:path")) as { join: (...parts: string[]) => string };
+
+/** 优先环境变量；默认取本机下载目录下的真实套件文件 */
+const env =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const REAL_FILE =
+  env.MYCHAT_REAL_SUITE ??
+  pathMod.join(osMod.homedir(), "Downloads", "Compressed", "FF5 Regex 3.0 Suite.json");
 
 /** 读取真实文件；缺 @types/node 所以这里显式忽略类型检查 */
 // @ts-expect-error 本项目未安装 @types/node，运行时由 Node 提供
