@@ -40,6 +40,10 @@ pub const MIGRATIONS: &[MigrationFn] = &[
 /// 无文件 = 旧库未知 → 视为需迁移(触发快照);迁移成功后与 sled 内版本同步写。
 const SCHEMA_FILE: &str = "schema_version.txt";
 
+/// 迁移快照目录名前缀（与 [`snapshot_before_migration`] 生成的名字一致）。
+/// 回滚时只认这个前缀，避免 marker 被改写成任意目录后照样被拷进数据库。
+const MIGRATION_SNAPSHOT_PREFIX: &str = "migration-snapshot-";
+
 fn app_data_dir() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").map_or_else(
         |_| {
@@ -105,7 +109,7 @@ fn snapshot_before_migration() -> Result<String, String> {
     if !src.is_dir() {
         return Ok(String::new()); // 新库,无需快照
     }
-    let snap = app_data_dir().join(format!("migration-snapshot-{}", unix_secs()));
+    let snap = app_data_dir().join(format!("{MIGRATION_SNAPSHOT_PREFIX}{}", unix_secs()));
     crate::commands::backup::copy_dir_all(&src, &snap)?;
     let marker = app_data_dir().join("migration_pending.txt");
     std::fs::write(&marker, snap.to_string_lossy().to_string())
@@ -118,18 +122,92 @@ fn clear_migration_marker() {
     let _ = std::fs::remove_file(app_data_dir().join("migration_pending.txt"));
 }
 
+/// 校验 marker 指向的回滚快照，返回规范化后的真实路径。
+///
+/// marker 是 `app_data_dir` 下的普通文本文件，可被任意本地进程改写。旧实现
+/// 只检查 `snap.is_dir()`，于是把 marker 改成 `C:\Users\<me>` 或应用数据
+/// 目录本身，回滚就会把那个目录整树 `copy_dir_all` 进 `sled_db`。
+/// 判据必须落在数据本体上：
+/// 1. `canonicalize` 成功：顺带解掉 `..`、符号链接与目录联接，后续判断
+///    一律基于解析后的真实路径；
+/// 2. 目录名必须以 [`MIGRATION_SNAPSHOT_PREFIX`] 开头 —— 只认本模块生成的
+///    快照名，任意用户目录不能冒充；
+/// 3. 必须是目录且含 sled 的数据文件 `db` —— 只有 `conf`/`blobs` 的是半份
+///    拷贝，拷回去等于把库换成空库；
+/// 4. 不能是应用数据目录本身，也不能是它的**祖先** —— 否则回滚会把用户
+///    数据整棵树拷进数据库。
+fn validate_rollback_snapshot_at(
+    snap: &Path,
+    app_data: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let canonical = std::fs::canonicalize(snap)
+        .map_err(|e| format!("回滚快照不存在或不可访问: {} ({e})", snap.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("回滚快照不是目录: {}", canonical.display()));
+    }
+    let name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if !name.starts_with(MIGRATION_SNAPSHOT_PREFIX) {
+        return Err(format!(
+            "快照目录名必须以 {MIGRATION_SNAPSHOT_PREFIX} 开头（实际 {name}）"
+        ));
+    }
+    if !canonical.join("db").is_file() {
+        return Err(format!(
+            "快照缺少 sled 数据文件 db（疑似半份拷贝）: {}",
+            canonical.display()
+        ));
+    }
+    if let Some(app_canonical) = resolve_app_data(app_data) {
+        if canonical == app_canonical {
+            return Err("快照不能是应用数据目录自身".to_string());
+        }
+        // 逐组件前缀比较：目标若是 app data 的祖先，回滚会连用户数据一起拷走。
+        if app_canonical.starts_with(&canonical) {
+            return Err(format!(
+                "{} 是应用数据目录的上级，回滚会覆盖用户数据",
+                canonical.display()
+            ));
+        }
+    }
+    Ok(canonical)
+}
+
+/// 解析应用数据目录的真实路径，**不要求它已存在**。
+///
+/// 全新安装时 `com.my-chat` 可能还没建出来；此时若直接 `canonicalize`
+/// 失败就跳过祖先检查，一个名字恰好带快照前缀的上级目录就能被回滚覆盖。
+/// 退路是规范化父目录再拼上末段名字 —— APPDATA 本身几乎总是存在的。
+fn resolve_app_data(app_data: &Path) -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(app_data) {
+        return Some(p);
+    }
+    let parent = std::fs::canonicalize(app_data.parent()?).ok()?;
+    Some(parent.join(app_data.file_name()?))
+}
+
 /// 启动时(DB 打开前)执行:若上次迁移失败留下 marker,把 `sled_db` 回滚到迁移前快照。
 /// main.rs 在 `run_pending_restore` 之后、`preflight_snapshot`/`init_db` 之前调用。
 pub fn run_pending_migration_rollback() -> Result<(), String> {
-    let marker = app_data_dir().join("migration_pending.txt");
+    let app_data = app_data_dir();
+    let marker = app_data.join("migration_pending.txt");
     if !marker.exists() {
         return Ok(());
     }
     let snap = std::path::PathBuf::from(std::fs::read_to_string(&marker).unwrap_or_default());
-    if !snap.is_dir() {
-        let _ = std::fs::remove_file(&marker);
-        return Err(format!("迁移快照不存在,已取消回滚: {}", snap.display()));
-    }
+    // marker 可被第三方改写：只有通过数据本体校验的快照才允许替换数据库。
+    // 不合法时删 marker + 落 chat_errors.log(启动错误最终只写到
+    // migration_error.log，用户不一定看得到)，然后以 Err 返回让调用方记录。
+    let snap = match validate_rollback_snapshot_at(&snap, &app_data) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_file(&marker);
+            crate::commands::chat::log_chat_error(&format!("迁移回滚已取消: {e}"));
+            return Err(format!("迁移回滚已取消: {e}"));
+        }
+    };
     let dest = super::app_db_path();
     let staging = dest.with_file_name(format!(
         "sled_db.rollback-staging-{}-{}",
@@ -452,6 +530,92 @@ mod tests {
         assert_eq!(leftovers, 0, "备份目录应被删除");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── 回滚 marker 校验：判据必须落在数据本体上 ─────────
+    //
+    // marker(`migration_pending.txt`)是 app_data_dir 下的普通文本文件，
+    // 任意本地进程都能改写。旧实现只查 `is_dir()`，改写成
+    // `C:\Users\<me>` 或应用数据目录后，回滚会把它整个拷进 sled_db。
+    // 下面四条覆盖：任意目录 / 半份快照 / 应用数据目录自身与祖先 / 合法快照。
+
+    /// 临时 app data 目录（`<temp>/com.my-chat`）。
+    fn temp_app_data(tag: &str) -> std::path::PathBuf {
+        let app = temp_dir(tag).join("com.my-chat");
+        std::fs::create_dir_all(&app).expect("create app data dir");
+        app
+    }
+
+    #[test]
+    fn rollback_rejects_arbitrary_dir_without_prefix() {
+        let app = temp_app_data("marker-arbitrary");
+        let evil = app.parent().unwrap().join("user-docs");
+        std::fs::create_dir_all(&evil).unwrap();
+        std::fs::write(evil.join("db"), b"not-a-sled-db").unwrap();
+
+        let err = validate_rollback_snapshot_at(&evil, &app)
+            .expect_err("无 migration-snapshot- 前缀的任意目录必须拒绝");
+        assert!(err.contains(MIGRATION_SNAPSHOT_PREFIX), "{err}");
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
+    fn rollback_rejects_snapshot_without_db_file() {
+        let app = temp_app_data("marker-no-db");
+        let snap = app
+            .parent()
+            .unwrap()
+            .join(format!("{MIGRATION_SNAPSHOT_PREFIX}123"));
+        // 半份拷贝：只有 conf/blobs，没有 sled 的数据文件 db
+        std::fs::create_dir_all(snap.join("blobs")).unwrap();
+        std::fs::write(snap.join("conf"), b"{}").unwrap();
+
+        let err =
+            validate_rollback_snapshot_at(&snap, &app).expect_err("缺 db 文件的半份快照必须拒绝");
+        assert!(err.contains("db"), "{err}");
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    #[test]
+    fn rollback_rejects_app_data_itself_and_ancestor() {
+        let outer = temp_dir("marker-appdata");
+        // 祖先：名字带前缀、也含 db，但应用数据目录在它内部 —— 回滚会连用户数据一起拷走
+        let ancestor = outer.join(format!("{MIGRATION_SNAPSHOT_PREFIX}root"));
+        std::fs::create_dir_all(&ancestor).unwrap();
+        std::fs::write(ancestor.join("db"), b"x").unwrap();
+        let nested_app = ancestor.join("com.my-chat");
+        std::fs::create_dir_all(&nested_app).unwrap();
+
+        let err = validate_rollback_snapshot_at(&ancestor, &nested_app)
+            .expect_err("应用数据目录的祖先必须拒绝");
+        assert!(err.contains("上级"), "{err}");
+
+        // 自身：应用数据目录名恰好带前缀且含 db
+        let self_app = outer.join(format!("{MIGRATION_SNAPSHOT_PREFIX}self"));
+        std::fs::create_dir_all(&self_app).unwrap();
+        std::fs::write(self_app.join("db"), b"x").unwrap();
+
+        let err = validate_rollback_snapshot_at(&self_app, &self_app)
+            .expect_err("应用数据目录自身必须拒绝");
+        assert!(err.contains("自身"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&outer);
+    }
+
+    #[test]
+    fn rollback_accepts_valid_snapshot() {
+        let app = temp_app_data("marker-valid");
+        let snap = app.join(format!("{MIGRATION_SNAPSHOT_PREFIX}1700000000"));
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("db"), b"sled").unwrap();
+        std::fs::write(snap.join("conf"), b"{}").unwrap();
+
+        let got = validate_rollback_snapshot_at(&snap, &app).expect("合法快照必须通过");
+        assert_eq!(got, std::fs::canonicalize(&snap).unwrap());
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
     }
 
     #[test]

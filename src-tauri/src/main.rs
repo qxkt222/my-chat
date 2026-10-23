@@ -363,6 +363,7 @@ pub fn run() {
             commands::backup::create_backup,
             commands::backup::list_backups,
             commands::backup::restore_backup,
+            commands::backup::delete_backup,
             commands::backup::webdav_upload,
             commands::mcp::mcp_list_servers,
             commands::mcp::mcp_save_server,

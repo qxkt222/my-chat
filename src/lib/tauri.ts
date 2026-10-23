@@ -439,6 +439,10 @@ export function listBackups(destDir: string): Promise<BackupInfoDto[]> {
 export function restoreBackup(backupDir: string): Promise<string> {
   return invoke("restore_backup", { backupDir });
 }
+/** 删除一个备份目录（普通备份或恢复前快照）；后端只接受 `my-chat-backup-` 前缀。 */
+export function deleteBackup(backupDir: string): Promise<void> {
+  return invoke("delete_backup", { backupDir });
+}
 export function webdavUpload(
   url: string,
   username: string,

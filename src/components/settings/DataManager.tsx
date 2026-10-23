@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { FolderOpen, Database, UploadCloud, RefreshCw } from "lucide-react";
+import { FolderOpen, Database, UploadCloud, RefreshCw, Trash2, X } from "lucide-react";
 import { useT } from "@/lib/i18n";
-import { createBackup, listBackups, restoreBackup, webdavUpload } from "@/lib/tauri";
+import { createBackup, deleteBackup, listBackups, restoreBackup, webdavUpload } from "@/lib/tauri";
+import { readStoredBackupDir, writeStoredBackupDir } from "@/lib/prefs";
 import { showToast } from "@/components/ui/Toast";
 import { askConfirm } from "@/components/ui/ConfirmDialog";
 
@@ -14,7 +15,8 @@ interface BackupItem {
 
 export function DataManager() {
   const t = useT();
-  const [backupDir, setBackupDir] = useState("");
+  // 挂载时读回上次用过的备份目录，免得每次都要重新输入
+  const [backupDir, setBackupDir] = useState(() => readStoredBackupDir());
   const [backups, setBackups] = useState<BackupItem[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -26,13 +28,27 @@ export function DataManager() {
 
   const defaultDir = "数据-备份";
 
-  const refreshList = async () => {
-    if (!backupDir.trim()) return;
+  // dir 参数：备份成功后要按「刚用过」的目录刷新，而 setBackupDir 不会立刻
+  // 改变闭包里的 backupDir（空输入时 dir 会回落到 defaultDir）。
+  const refreshList = async (dir: string = backupDir) => {
+    if (!dir.trim()) return;
     try {
-      setBackups(await listBackups(backupDir.trim()));
+      setBackups(await listBackups(dir.trim()));
     } catch (e) {
       showToast("error", `${t("data.listFail")}${e}`);
     }
+  };
+
+  /** 输入即持久化；空值在 prefs 里等价于删除 key */
+  const changeDir = (value: string) => {
+    setBackupDir(value);
+    writeStoredBackupDir(value);
+  };
+
+  /** 「清除」按钮：清空输入 + 删除已存路径，两条路径都走 writeStoredBackupDir("") */
+  const clearDir = () => {
+    setBackupDir("");
+    writeStoredBackupDir("");
   };
 
   const doBackup = async () => {
@@ -42,7 +58,9 @@ export function DataManager() {
       const p = await createBackup(dir);
       showToast("success", `${t("data.backupDone")}${p}`);
       setBackupDir(dir);
-      refreshList();
+      // 记下真正用过的目录（含回落到默认目录的情况），下次自动带出
+      writeStoredBackupDir(dir);
+      refreshList(dir);
     } catch (e) {
       showToast("error", `${t("data.backupFail")}${e}`);
     }
@@ -56,6 +74,17 @@ export function DataManager() {
       showToast("success", msg);
     } catch (e) {
       showToast("error", `${t("data.restoreFail")}${e}`);
+    }
+  };
+
+  const doDelete = async (item: BackupItem) => {
+    if (!(await askConfirm(t("data.deleteConfirm", { name: item.name })))) return;
+    try {
+      await deleteBackup(item.path);
+      showToast("success", t("data.deleted", { name: item.name }));
+      await refreshList();
+    } catch (e) {
+      showToast("error", `${t("data.deleteFail")}${e}`);
     }
   };
 
@@ -84,12 +113,23 @@ export function DataManager() {
           <span className="text-sm font-semibold">{t("data.localBackup")}</span>
         </div>
         <div className="flex gap-1 mb-2">
-          <input
-            value={backupDir}
-            onChange={(e) => setBackupDir(e.target.value)}
-            placeholder={t("data.backupDirPlaceholder", { dir: defaultDir })}
-            className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded"
-          />
+          <div className="relative flex-1">
+            <input
+              value={backupDir}
+              onChange={(e) => changeDir(e.target.value)}
+              placeholder={t("data.backupDirPlaceholder", { dir: defaultDir })}
+              className="w-full px-2 py-1.5 pr-7 text-xs bg-background border border-input rounded"
+            />
+            <button
+              onClick={clearDir}
+              disabled={!backupDir}
+              className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground disabled:opacity-30"
+              title={t("data.clearDir")}
+              aria-label={t("data.clearDir")}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <button
             onClick={doBackup}
             disabled={busy}
@@ -99,7 +139,7 @@ export function DataManager() {
             {busy ? t("data.backingUp") : t("data.backupNow")}
           </button>
           <button
-            onClick={refreshList}
+            onClick={() => refreshList()}
             disabled={!backupDir.trim()}
             className="p-1.5 rounded border border-input bg-background text-muted-foreground hover:text-foreground disabled:opacity-40"
             title={t("data.refresh")}
@@ -133,6 +173,13 @@ export function DataManager() {
                   title={t("data.restore")}
                 >
                   {t("data.restore")}
+                </button>
+                <button
+                  onClick={() => doDelete(b)}
+                  className="px-2 py-0.5 rounded border border-input text-muted-foreground hover:bg-destructive/10 hover:text-destructive shrink-0 flex items-center gap-0.5"
+                  title={t("data.delete")}
+                >
+                  <Trash2 className="w-3 h-3" /> {t("data.delete")}
                 </button>
               </div>
             ))}

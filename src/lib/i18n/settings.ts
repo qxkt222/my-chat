@@ -311,6 +311,7 @@ export const settingsMessages: Record<string, Record<string, string>> = {
   "data.backingUp": { zh: "备份中…", en: "Backing up…" },
   "data.backupNow": { zh: "立即备份", en: "Backup Now" },
   "data.refresh": { zh: "刷新列表", en: "Refresh list" },
+  "data.clearDir": { zh: "清除已保存的路径", en: "Clear saved path" },
   "data.upload": { zh: "上传", en: "Upload" },
   "data.uploadWebdav": { zh: "上传到 WebDAV", en: "Upload to WebDAV" },
   "data.restore": { zh: "恢复", en: "Restore" },
@@ -337,6 +338,13 @@ export const settingsMessages: Record<string, Record<string, string>> = {
     en: 'Restore "{name}" over current data? Consider backing up first.',
   },
   "data.restoreFail": { zh: "恢复失败：", en: "Restore failed: " },
+  "data.delete": { zh: "删除", en: "Delete" },
+  "data.deleteConfirm": {
+    zh: "确定删除备份「{name}」？此操作不可撤销。",
+    en: 'Delete backup "{name}"? This cannot be undone.',
+  },
+  "data.deleted": { zh: "已删除备份「{name}」", en: 'Deleted backup "{name}"' },
+  "data.deleteFail": { zh: "删除失败：", en: "Delete failed: " },
   "data.uploadNeedConfig": {
     zh: "请先填写 WebDAV 地址和账号",
     en: "Fill in the WebDAV URL and username first",
