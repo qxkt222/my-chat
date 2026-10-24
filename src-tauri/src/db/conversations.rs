@@ -24,6 +24,15 @@ pub struct Conversation {
     /// Missing in old data → 0 (首次触发总结).
     #[serde(default)]
     pub summary_msg_count: i64,
+    /// 工作区子模式归属: `chat`(对话) / `work`(工作)。
+    /// 旧数据/旧 JSON 导入件没有该字段 → `"work"`（升级后全部落在工作列表，不消失）。
+    #[serde(default = "default_work_mode")]
+    pub work_mode: String,
+}
+
+/// 旧数据缺 `work_mode` 时的默认值。也供 `commands::db::ConvDto` 复用。
+pub fn default_work_mode() -> String {
+    "work".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -407,8 +416,40 @@ mod tests {
             persona_id: String::new(),
             summary: String::new(),
             summary_msg_count: 0,
+            work_mode: default_work_mode(),
         };
         assert!(create_conv(&conv).is_err(), "会话 id 含 ':' 必须拒绝");
+    }
+
+    // 旧 sled 记录 / 旧 JSON 导入件没有 work_mode 字段：必须解析成功并归到 work。
+    #[test]
+    fn old_json_without_work_mode_defaults_to_work() {
+        let raw = r#"{
+            "id": "c1",
+            "title": "旧会话",
+            "model_name": "m",
+            "system_prompt": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let c: Conversation = serde_json::from_str(raw).expect("旧数据缺 work_mode 不应解析失败");
+        assert_eq!(c.work_mode, "work");
+        assert_eq!(c.character_id, "");
+        assert_eq!(c.summary_msg_count, 0);
+    }
+
+    // create_conv 原样保存：chat 经过 serde_json 序列化/反序列化后不变。
+    #[test]
+    fn work_mode_survives_create_serialization() {
+        let mut c: Conversation = serde_json::from_str(
+            r#"{"id":"c1","title":"t","model_name":"m","system_prompt":"",
+                "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        c.work_mode = "chat".to_string();
+        let bytes = serde_json::to_vec(&c).expect("序列化失败");
+        let back: Conversation = serde_json::from_slice(&bytes).expect("反序列化失败");
+        assert_eq!(back.work_mode, "chat");
     }
 
     #[test]

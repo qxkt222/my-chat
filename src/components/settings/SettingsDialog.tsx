@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X, Plus, Trash2 } from "lucide-react";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useAppConfigStore, applyFontSize } from "@/stores/useAppConfigStore";
@@ -62,6 +62,7 @@ export function SettingsDialog({ open, onClose }: Props) {
   const cfg = useAppConfigStore();
   const mode = useAppModeStore((s) => s.mode);
   const subMode = useAppModeStore((s) => s.tavernSubMode);
+  const workSubMode = useAppModeStore((s) => s.workSubMode);
   const [models, setModels] = useState<ModelConfig[]>(s.models);
   const [active, setActive] = useState(s.activeModel);
   const [temp, setTemp] = useState(s.defaultParameters.temperature || 0.7);
@@ -80,6 +81,29 @@ export function SettingsDialog({ open, onClose }: Props) {
   // 工作模式自动记忆(记忆卡)开关 + 临时会话:实时同步 store
   const workAutoSummarize = useChatStore((s) => s.workAutoSummarize);
   const workTempMode = useChatStore((s) => s.workTempMode);
+
+  // ⚠️ 跨 scope 串值修复(2026-10-23):上面几个 useState 只在挂载那一刻取值,
+  //    而 Header 是**常驻挂载**(原先 key 只有 mode,连工作子模式都不重挂),
+  //    用户切过 对话/工作 再打开设置,看到的是启动时那套值,保存就把旧 scope
+  //    的采样参数写进新 scope。这里在「关闭→打开」或 scope 变化时重新从 store 同步。
+  //    只在两个时机同步,**不随 store 变化实时覆盖** —— 否则用户正在表单里改的值
+  //    会被一次无关的 store 更新(如模型列表刷新)打回原样。
+  const scopeKey = `${mode}:${workSubMode}`;
+  const prevOpen = useRef(false);
+  const prevScopeKey = useRef(scopeKey);
+  useEffect(() => {
+    const justOpened = open && !prevOpen.current;
+    const scopeChanged = prevScopeKey.current !== scopeKey;
+    prevOpen.current = open;
+    prevScopeKey.current = scopeKey;
+    if (!open || (!justOpened && !scopeChanged)) return;
+    // 用 getState() 而不是渲染期快照 `s`:effect 执行时 store 可能已经换成新 scope
+    const st = useSettingsStore.getState();
+    setModels([...st.models]);
+    setActive(st.activeModel);
+    setTemp(st.defaultParameters.temperature ?? 0.7);
+    setMaxT(st.defaultParameters.max_tokens ?? 2048);
+  }, [open, scopeKey]);
 
   // 当前模式的 tab 顺序:专属在前,通用在后(酒馆按子模式分)
   const tabs: TabKey[] =
@@ -160,7 +184,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               ? subMode === "simulate"
                 ? t("settings.simTitle")
                 : t("settings.tavernTitle")
-              : t("settings.title")}
+              : workSubMode === "chat"
+                ? t("settings.workChatTitle")
+                : t("settings.workWorkTitle")}
           </h2>
           <button onClick={onClose} className="p-1 rounded hover:bg-muted">
             <X className="w-4 h-4" />

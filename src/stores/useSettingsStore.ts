@@ -24,12 +24,30 @@ import {
   logDiag,
 } from "@/lib/tauri";
 
+/** 工作区子模式：设置「值」按这两套分开存（数据类内容仍全局共享） */
+export type SettingsScope = "chat" | "work";
+
+/** 每个 scope 独立的一份设置值 */
+export interface ScopedSettingsValues {
+  activeModel: string;
+  defaultParameters: ModelParameters;
+  budgetConfig: BudgetConfig;
+  globalInstruction: string;
+  thinkingEnabled: boolean;
+  reasoningEffort: "low" | "medium" | "high" | "max";
+  stoppingStrings: string[];
+}
+
 interface SettingsState {
   appDir: string;
   models: ModelConfig[];
   activeModel: string;
   defaultParameters: ModelParameters;
   loaded: boolean;
+  /** 当前编辑/生效的子模式 scope */
+  scope: SettingsScope;
+  /** 两套独立设置值（顶层字段始终是 scope 对应的一份） */
+  scopes: Record<SettingsScope, ScopedSettingsValues>;
   /** 采样器预设(酒馆 API 响应配置存档) */
   samplerPresets: SamplerPreset[];
   /** AI 回复 Regex 后处理规则(内置 + 自定义) */
@@ -51,6 +69,8 @@ interface SettingsState {
   reasoningEffort: "low" | "medium" | "high" | "max";
   load: () => Promise<void>;
   save: () => Promise<void>;
+  /** 切换生效 scope：把顶层字段换成该 scope 的值（不落盘） */
+  applyScope: (mode: SettingsScope) => void;
   addModel: (model: ModelConfig) => void;
   updateModel: (name: string, patch: Partial<ModelConfig>) => void;
   removeModel: (name: string) => void;
@@ -143,11 +163,134 @@ function parseParams(raw: string | undefined): ModelParameters {
   }
 }
 
+/** 工作 scope 沿用历史 key；对话 scope 用 `${key}#chat` —— 旧数据天然继续属于「工作」 */
+export function scopedSettingKey(base: string, scope: SettingsScope): string {
+  return scope === "chat" ? `${base}#chat` : base;
+}
+
+const WORK_SUB_MODE_STORAGE_KEY = "work_sub_mode";
+
+/**
+ * 启动时读子模式。直接读 localStorage 而不是 import useAppModeStore：
+ * useAppModeStore 不应反向依赖设置 store，避免循环依赖。
+ */
+function readInitialScope(): SettingsScope {
+  try {
+    if (
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem(WORK_SUB_MODE_STORAGE_KEY) === "chat"
+    ) {
+      return "chat";
+    }
+  } catch {
+    /* ignore */
+  }
+  return "work";
+}
+
+function defaultScopedValues(): ScopedSettingsValues {
+  return {
+    activeModel: "",
+    defaultParameters: { ...DEFAULT_PARAMS },
+    budgetConfig: { ...DEFAULT_BUDGET },
+    globalInstruction: "",
+    thinkingEnabled: true,
+    reasoningEffort: "high",
+    stoppingStrings: [],
+  };
+}
+
+/**
+ * 读一套 scope 的值。fallback 是「这个 key 缺失时」的取值：
+ * 工作 scope 传默认值，对话 scope 传工作 scope 的值（首次继承，不落盘）。
+ */
+async function readScopedValues(
+  scope: SettingsScope,
+  fallback: ScopedSettingsValues
+): Promise<ScopedSettingsValues> {
+  const values: ScopedSettingsValues = {
+    activeModel: fallback.activeModel,
+    defaultParameters: { ...fallback.defaultParameters },
+    budgetConfig: { ...fallback.budgetConfig },
+    globalInstruction: fallback.globalInstruction,
+    thinkingEnabled: fallback.thinkingEnabled,
+    reasoningEffort: fallback.reasoningEffort,
+    stoppingStrings: [...fallback.stoppingStrings],
+  };
+  const read = (base: string) => dbGetSetting(scopedSettingKey(base, scope));
+
+  try {
+    const raw = await read("active_model");
+    if (raw) values.activeModel = raw;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const raw = await read("default_parameters");
+    if (raw) values.defaultParameters = { ...DEFAULT_PARAMS, ...parseParams(raw) };
+  } catch {
+    /* ignore */
+  }
+  try {
+    const raw = await read("thinking_config");
+    if (raw) {
+      const cfg = JSON.parse(raw) as { enabled?: unknown; effort?: unknown };
+      if (typeof cfg.enabled === "boolean") values.thinkingEnabled = cfg.enabled;
+      // 逐字面量比较而不是 includes()：这样 TS 会把类型收窄，不需要断言
+      if (
+        cfg.effort === "low" ||
+        cfg.effort === "medium" ||
+        cfg.effort === "high" ||
+        cfg.effort === "max"
+      ) {
+        values.reasoningEffort = cfg.effort;
+      }
+    }
+  } catch {
+    /* ignore bad JSON */
+  }
+  try {
+    const raw = await read("global_instruction");
+    if (raw) values.globalInstruction = raw;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const raw = await read("budget_config");
+    if (raw) values.budgetConfig = sanitizeBudgetConfig(JSON.parse(raw));
+  } catch {
+    /* ignore */
+  }
+  try {
+    const raw = await read("stopping_strings");
+    if (raw) values.stoppingStrings = sanitizeStringArray(JSON.parse(raw));
+  } catch {
+    /* ignore */
+  }
+  return values;
+}
+
+/** 把补丁写进当前 scope；调用处仍需同步顶层字段（顶层 = 当前 scope 的镜像） */
+function patchScope(
+  state: SettingsState,
+  patch: Partial<ScopedSettingsValues>
+): Record<SettingsScope, ScopedSettingsValues> {
+  return {
+    ...state.scopes,
+    [state.scope]: { ...state.scopes[state.scope], ...patch },
+  };
+}
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   appDir: "",
   models: [],
   activeModel: "",
   defaultParameters: { ...DEFAULT_PARAMS },
+  scope: readInitialScope(),
+  scopes: {
+    work: defaultScopedValues(),
+    chat: defaultScopedValues(),
+  },
   samplerPresets: [...BUILTIN_SAMPLERS],
   regexRules: [...BUILTIN_REGEX_RULES],
   modelWrappers: [],
@@ -164,39 +307,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     try {
       // list_models_decrypted returns API keys already decrypted by Rust (DPAPI)
       const models = await dbListModelsDecrypted();
-      const activeModel = await dbGetSetting("active_model");
-      // Load persisted default parameters (temperature / max_tokens)
-      let defaultParameters: ModelParameters = { ...DEFAULT_PARAMS };
-      const paramsRaw = await dbGetSetting("default_parameters");
-      if (paramsRaw) {
-        try {
-          // parseParams 已逐字段 typeof 校验，坏 JSON/坏字段都回落到默认值
-          defaultParameters = { ...defaultParameters, ...parseParams(paramsRaw) };
-        } catch {
-          /* ignore bad JSON */
-        }
-      }
-      // Load thinking config (default: thinking on, effort high)
-      let thinkingEnabled = true;
-      let reasoningEffort: "low" | "medium" | "high" | "max" = "high";
-      const thinkingRaw = await dbGetSetting("thinking_config");
-      if (thinkingRaw) {
-        try {
-          const cfg = JSON.parse(thinkingRaw) as { enabled?: unknown; effort?: unknown };
-          if (typeof cfg.enabled === "boolean") thinkingEnabled = cfg.enabled;
-          // 逐字面量比较而不是 includes()：这样 TS 会把类型收窄，不需要断言
-          if (
-            cfg.effort === "low" ||
-            cfg.effort === "medium" ||
-            cfg.effort === "high" ||
-            cfg.effort === "max"
-          ) {
-            reasoningEffort = cfg.effort;
-          }
-        } catch {
-          /* ignore bad JSON */
-        }
-      }
+      // 两套 scope 的值：工作沿用历史 key，对话用 `${key}#chat`。
+      // 对话首次没有自己的值时继承工作值 —— 只在内存里继承，不落盘。
+      const workValues = await readScopedValues("work", defaultScopedValues());
+      const chatValues = await readScopedValues("chat", workValues);
       // Load sampler presets (酒馆 API 响应配置存档)
       let samplerPresets: SamplerPreset[] = [...BUILTIN_SAMPLERS];
       try {
@@ -230,29 +344,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       } catch {
         /* ignore */
       }
-      // Load global instruction (作用域最低层)
-      let globalInstruction = "";
-      try {
-        globalInstruction = (await dbGetSetting("global_instruction")) || "";
-      } catch {
-        /* ignore */
-      }
-      // Load budget config (Token 预算:监控 + 手动/自动双模式)
-      let budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET };
-      try {
-        const raw = await dbGetSetting("budget_config");
-        if (raw) budgetConfig = sanitizeBudgetConfig(JSON.parse(raw));
-      } catch {
-        /* ignore */
-      }
-      // Load stopping strings (酒馆 Stopping Strings)
-      let stoppingStrings: string[] = [];
-      try {
-        const raw = await dbGetSetting("stopping_strings");
-        if (raw) stoppingStrings = sanitizeStringArray(JSON.parse(raw));
-      } catch {
-        /* ignore */
-      }
       // Load connection profiles (酒馆 Connection Profiles)
       let connectionProfiles: ConnectionProfile[] = [];
       try {
@@ -274,27 +365,36 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           parameters: parseParams(m.params_json),
         }));
       // Remap active_model if it pointed at a dropped record ("DeepSeek " → "DeepSeek")
-      let effectiveActive = activeModel || "";
-      if (effectiveActive && !validModels.some((m) => m.name === effectiveActive)) {
-        const trimmed = effectiveActive.trim();
+      // 两套 scope 各自修复，避免对话 scope 的历史值在切换后指向不存在的模型。
+      const remapActive = (name: string): string => {
+        if (!name) return "";
+        if (validModels.some((m) => m.name === name)) return name;
+        const trimmed = name.trim();
         const match = validModels.find((m) => m.name === trimmed);
-        effectiveActive = match ? match.name : "";
-      }
+        return match ? match.name : "";
+      };
+      const scopes: Record<SettingsScope, ScopedSettingsValues> = {
+        work: { ...workValues, activeModel: remapActive(workValues.activeModel) },
+        chat: { ...chatValues, activeModel: remapActive(chatValues.activeModel) },
+      };
+      // 顶层字段始终呈现当前 scope（启动时按 localStorage 的 work_sub_mode 决定）
+      const current = scopes[get().scope];
       set({
         models: validModels,
-        activeModel: effectiveActive,
-        defaultParameters,
+        scopes,
+        activeModel: current.activeModel,
+        defaultParameters: current.defaultParameters,
         samplerPresets,
         regexRules,
         modelWrappers,
         projectInstructions,
-        globalInstruction,
-        budgetConfig,
-        stoppingStrings,
+        globalInstruction: current.globalInstruction,
+        budgetConfig: current.budgetConfig,
+        stoppingStrings: current.stoppingStrings,
         connectionProfiles,
         loaded: true,
-        thinkingEnabled,
-        reasoningEffort,
+        thinkingEnabled: current.thinkingEnabled,
+        reasoningEffort: current.reasoningEffort,
       });
     } catch {
       set({ loaded: true });
@@ -302,7 +402,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   save: async () => {
-    const { models, activeModel, defaultParameters } = get();
+    const { models, activeModel, defaultParameters, scope, thinkingEnabled, reasoningEffort } =
+      get();
     // Upsert per model — save_model overwrites by name, so a mid-loop failure
     // (network, disk) no longer wipes every model the way delete-all + rewrite did.
     for (const m of models) {
@@ -315,16 +416,23 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         params_json: JSON.stringify(m.parameters || defaultParameters),
       });
     }
-    await dbSaveSetting("active_model", activeModel);
-    await dbSaveSetting("default_parameters", JSON.stringify(defaultParameters));
+    // 只写当前 scope 的三个 key（预算/全局指令/停止串由各自 setter 即时落盘）
+    await dbSaveSetting(scopedSettingKey("active_model", scope), activeModel);
     await dbSaveSetting(
-      "thinking_config",
-      JSON.stringify({
-        enabled: get().thinkingEnabled,
-        effort: get().reasoningEffort,
-      })
+      scopedSettingKey("default_parameters", scope),
+      JSON.stringify(defaultParameters)
+    );
+    await dbSaveSetting(
+      scopedSettingKey("thinking_config", scope),
+      JSON.stringify({ enabled: thinkingEnabled, effort: reasoningEffort })
     );
   },
+
+  applyScope: (mode) =>
+    set((s) => ({
+      scope: mode,
+      ...s.scopes[mode],
+    })),
 
   addModel: (model) => set((s) => ({ models: [...s.models, model] })),
   updateModel: (name, patch) =>
@@ -339,20 +447,40 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // 落库失败会让这个模型在下次 save / restart 时「复活」—— 必须留痕
       logDiag(`dbDeleteModel failed: ${String(e)} name=${name}`);
     });
-    set((s) => ({
-      models: s.models.filter((m) => m.name !== name),
-      activeModel: s.activeModel === name ? "" : s.activeModel,
-    }));
+    set((s) => {
+      const activeModel = s.activeModel === name ? "" : s.activeModel;
+      return {
+        models: s.models.filter((m) => m.name !== name),
+        activeModel,
+        scopes: patchScope(s, { activeModel }),
+      };
+    });
   },
-  setActiveModel: (name) => set({ activeModel: name }),
-  setDefaultParameters: (params) => set({ defaultParameters: params }),
+  setActiveModel: (name) =>
+    set((s) => ({
+      activeModel: name,
+      scopes: patchScope(s, { activeModel: name }),
+    })),
+  setDefaultParameters: (params) =>
+    set((s) => ({
+      defaultParameters: params,
+      scopes: patchScope(s, { defaultParameters: params }),
+    })),
   setThinkingConfig: (enabled, effort) =>
-    set({ thinkingEnabled: enabled, reasoningEffort: effort }),
+    set((s) => ({
+      thinkingEnabled: enabled,
+      reasoningEffort: effort,
+      scopes: patchScope(s, { thinkingEnabled: enabled, reasoningEffort: effort }),
+    })),
 
   persistActiveModel: (name) => {
-    set({ activeModel: name });
-    dbSaveSetting("active_model", name).catch((e: unknown) => {
-      logDiag(`persistActiveModel failed: ${String(e)} name=${name}`);
+    const scope = get().scope;
+    set((s) => ({
+      activeModel: name,
+      scopes: patchScope(s, { activeModel: name }),
+    }));
+    dbSaveSetting(scopedSettingKey("active_model", scope), name).catch((e: unknown) => {
+      logDiag(`persistActiveModel failed: ${String(e)} name=${name} scope=${scope}`);
     });
   },
 
@@ -448,13 +576,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setGlobalInstruction: async (s) => {
-    set({ globalInstruction: s });
-    await dbSaveSetting("global_instruction", s);
+    const scope = get().scope;
+    set((st) => ({
+      globalInstruction: s,
+      scopes: patchScope(st, { globalInstruction: s }),
+    }));
+    await dbSaveSetting(scopedSettingKey("global_instruction", scope), s);
   },
 
   setStoppingStrings: async (ss) => {
-    set({ stoppingStrings: ss });
-    await dbSaveSetting("stopping_strings", JSON.stringify(ss));
+    const scope = get().scope;
+    set((st) => ({
+      stoppingStrings: ss,
+      scopes: patchScope(st, { stoppingStrings: ss }),
+    }));
+    await dbSaveSetting(scopedSettingKey("stopping_strings", scope), JSON.stringify(ss));
   },
 
   saveConnectionProfile: async (p) => {
@@ -482,7 +618,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   setBudgetConfig: async (cfg) => {
-    set({ budgetConfig: cfg });
-    await dbSaveSetting("budget_config", JSON.stringify(cfg));
+    const scope = get().scope;
+    set((st) => ({
+      budgetConfig: cfg,
+      scopes: patchScope(st, { budgetConfig: cfg }),
+    }));
+    await dbSaveSetting(scopedSettingKey("budget_config", scope), JSON.stringify(cfg));
   },
 }));

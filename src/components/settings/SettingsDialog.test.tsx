@@ -283,3 +283,17 @@ describe("SettingsDialog 逃生通道", () => {
     expect(screen.queryByDisplayValue("模板59")).toBeNull();
   });
 });
+
+describe("设置弹窗标题标明当前工作子模式", () => {
+  it("对话 / 工作子模式分别显示「设置 · 对话」与「设置 · 工作」", async () => {
+    useAppModeStore.setState({ mode: "work", workSubMode: "chat" });
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("设置 · 对话");
+
+    // 子模式切换后标题跟着变（设置值由 useSettingsStore.applyScope 负责，不在本测试范围）
+    useAppModeStore.setState({ workSubMode: "work" });
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("设置 · 工作");
+    });
+  });
+});

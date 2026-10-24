@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Conversation, Message } from "@/types";
+import type { Conversation, Message, WorkSubMode } from "@/types";
 import {
   dbCreateConv,
   dbLoadAll,
@@ -17,6 +17,7 @@ import {
   dbBatchDeleteConvs,
 } from "@/lib/tauri";
 import { useCharacterStore } from "./useCharacterStore";
+import { useAppModeStore } from "./useAppModeStore";
 import { parseErrorKind } from "@/lib/persist-sanitize";
 
 function generateId(): string {
@@ -28,6 +29,53 @@ function nowISO(): string {
 
 /** 归档会话的 localStorage key(与 toggleArchive 共用) */
 const ARCHIVED_KEY = "arc_convs";
+
+/** 每个子模式各自记住的 activeId（刷新/重启后恢复） */
+const ACTIVE_KEY = (mode: WorkSubMode) => `conv_active_${mode}`;
+
+/** 读取当前工作子模式。字段由 useAppModeStore 维护；缺失/非法值按 "work" 兜底，
+ *  保证升级前建的会话仍落在「工作」列表里。 */
+function readWorkSubMode(): WorkSubMode {
+  const state = useAppModeStore.getState() as { workSubMode?: WorkSubMode };
+  return state.workSubMode === "chat" ? "chat" : "work";
+}
+
+/** 前端兜底：旧数据没有 work_mode（或值陌生）一律归到「工作」 */
+export function convWorkMode(c: Pick<Conversation, "work_mode">): WorkSubMode {
+  return c.work_mode === "chat" ? "chat" : "work";
+}
+
+function readActive(mode: WorkSubMode): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_KEY(mode));
+  } catch {
+    return null;
+  }
+}
+
+function persistActive(mode: WorkSubMode, id: string | null) {
+  try {
+    if (id) localStorage.setItem(ACTIVE_KEY(mode), id);
+    else localStorage.removeItem(ACTIVE_KEY(mode));
+  } catch {
+    // localStorage 不可用(隐私模式等)：仅失去跨重启记忆，不影响本次会话
+  }
+}
+
+function visibleOf(all: Conversation[], mode: WorkSubMode): Conversation[] {
+  return all.filter((c) => convWorkMode(c) === mode);
+}
+
+/** 选择要恢复的 activeId：优先该模式记住的；否则取最近更新的；没有则 null。 */
+function pickActive(visible: Conversation[], remembered: string | null): string | null {
+  if (remembered && visible.some((c) => c.id === remembered)) return remembered;
+  if (visible.length === 0) return null;
+  return (
+    [...visible].sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    )[0]?.id ?? null
+  );
+}
 
 /** Build the partial DTO shape the Rust side expects for a stored message */
 function toMsgDto(msg: Message, convId: string, seq: number) {
@@ -48,11 +96,22 @@ function toMsgDto(msg: Message, convId: string, seq: number) {
 }
 
 interface ConversationState {
+  /** 全量会话：工作模式下除 RP 外的全部会话（跨越 chat/work 两个子模式） */
+  allConversations: Conversation[];
+  /** 当前子模式可见的会话（allConversations 的过滤视图） */
   conversations: Conversation[];
+  /** 当前工作子模式：对话 / 工作 */
+  workSubMode: WorkSubMode;
+  /** 每个子模式各自记住的 activeId */
+  activeByMode: Record<WorkSubMode, string | null>;
+  /** 每个子模式各自的标签集合（切换模式不串台） */
+  tabsByMode: Record<WorkSubMode, string[]>;
   activeId: string | null;
   tabIds: string[];
   loaded: boolean;
   load: () => Promise<void>;
+  /** 模式切换方调用：重算可见列表 / activeId / tabIds，并恢复该模式上次的会话 */
+  applyWorkSubMode: (mode: WorkSubMode) => void;
   save: (conv: Conversation) => Promise<void>;
   create: () => Promise<Conversation>;
   /** 新建绑定角色的角色扮演会话(酒馆风格:标题=角色名,自动写入开场白 first_mes) */
@@ -98,8 +157,28 @@ interface ConversationState {
   isArchived: (id: string) => boolean;
 }
 
+/** 全量列表读取：优先 allConversations；为空时回退到 conversations，
+ *  兼容测试/旧调用方直接 `setState({ conversations })` 的写法。 */
+function allOf(s: Pick<ConversationState, "allConversations" | "conversations">): Conversation[] {
+  return s.allConversations.length > 0 ? s.allConversations : s.conversations;
+}
+
+/** 把「全量列表 + 当前子模式」同步成可见列表。
+ *  fallback 模式下（allConversations 为空、数据由 `setState({conversations})` 注入）
+ *  不回写 allConversations —— 否则注入的数据会被固化成"全量源"，跨用例/跨调用残留。 */
+function withAll(s: ConversationState, all: Conversation[]) {
+  if (s.allConversations.length === 0) {
+    return { conversations: visibleOf(all, s.workSubMode) };
+  }
+  return { allConversations: all, conversations: visibleOf(all, s.workSubMode) };
+}
+
 export const useConversationStore = create<ConversationState>((set, get) => ({
+  allConversations: [],
   conversations: [],
+  workSubMode: readWorkSubMode(),
+  activeByMode: { chat: readActive("chat"), work: readActive("work") },
+  tabsByMode: { chat: [], work: [] },
   activeId: null,
   tabIds: [],
   loaded: false,
@@ -121,6 +200,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           system_prompt: c.system_prompt || "",
           character_id: c.character_id || "",
           persona_id: c.persona_id || "",
+          // 旧库/旧导入件无 work_mode → 归到「工作」，升级后会话不消失
+          work_mode: convWorkMode(c),
           // 自动记忆(RP 会话在工作模式的扩展):摘要从 sled 恢复
           summary: c.summary || "",
           summary_msg_count: c.summary_msg_count ?? 0,
@@ -139,34 +220,78 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           })),
         }));
       result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      set({ conversations: result, loaded: true });
+
+      const s = get();
+      const mode = s.workSubMode;
+      const visible = visibleOf(result, mode);
+      const visibleIds = new Set(visible.map((c) => c.id));
+      // 启动时只恢复「该模式记住的」会话；没有记忆则保持空态（不擅自打开旧会话）
+      const remembered = s.activeByMode[mode];
+      const activeId = remembered && visibleIds.has(remembered) ? remembered : null;
+      let tabIds = s.tabsByMode[mode].filter((id) => visibleIds.has(id));
+      if (activeId && !tabIds.includes(activeId)) tabIds = [...tabIds, activeId];
+
+      set({
+        allConversations: result,
+        conversations: visible,
+        activeId,
+        tabIds,
+        activeByMode: { ...s.activeByMode, [mode]: activeId },
+        tabsByMode: { ...s.tabsByMode, [mode]: tabIds },
+        loaded: true,
+      });
     } catch {
       set({ loaded: true });
     }
   },
 
+  applyWorkSubMode: (mode) => {
+    const s = get();
+    const all = allOf(s);
+    const visible = visibleOf(all, mode);
+    const activeId = pickActive(visible, s.activeByMode[mode]);
+    const visibleIds = new Set(visible.map((c) => c.id));
+    let tabIds = s.tabsByMode[mode].filter((id) => visibleIds.has(id));
+    // 恢复的会话也要出现在标签栏，行为与 create/openTab 一致
+    if (activeId && !tabIds.includes(activeId)) tabIds = [...tabIds, activeId];
+
+    persistActive(mode, activeId);
+    set({
+      workSubMode: mode,
+      conversations: visible,
+      activeId,
+      tabIds,
+      activeByMode: { ...s.activeByMode, [mode]: activeId },
+      tabsByMode: { ...s.tabsByMode, [mode]: tabIds },
+    });
+  },
+
   save: async (conv) => {
+    const updatedAt = nowISO();
+    const workMode = convWorkMode(conv);
     await dbCreateConv({
       id: conv.id,
       title: conv.title,
       model_name: conv.model_name || "",
       system_prompt: conv.system_prompt || "",
       created_at: conv.created_at,
-      updated_at: nowISO(),
+      updated_at: updatedAt,
       character_id: conv.character_id || "",
       persona_id: conv.persona_id || "",
       // 自动记忆(RP 会话在工作模式的扩展):摘要持久化,重启保留
       summary: conv.summary || "",
       summary_msg_count: conv.summary_msg_count ?? 0,
+      work_mode: workMode,
     });
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
-        c.id === conv.id ? { ...conv, updated_at: nowISO() } : c
-      ),
-    }));
+    const saved: Conversation = { ...conv, updated_at: updatedAt, work_mode: workMode };
+    set((s) => {
+      const all = allOf(s).map((c) => (c.id === conv.id ? saved : c));
+      return withAll(s, all);
+    });
   },
 
   create: async () => {
+    const mode = get().workSubMode;
     const conv: Conversation = {
       id: generateId(),
       title: "New Chat",
@@ -174,6 +299,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       updated_at: nowISO(),
       model_name: "",
       messages: [],
+      work_mode: mode,
     };
     await dbCreateConv({
       id: conv.id,
@@ -182,12 +308,21 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       system_prompt: "",
       created_at: conv.created_at,
       updated_at: conv.updated_at,
+      work_mode: mode,
     });
-    set((s) => ({
-      conversations: [conv, ...s.conversations],
+    const s = get();
+    const all = [conv, ...allOf(s)];
+    const tabIds = [...s.tabIds.filter((id) => id !== conv.id), conv.id];
+    persistActive(mode, conv.id);
+    set({
+      // 新建即建立全量源（即使此前是零会话），避免后续 applyWorkSubMode 丢失它
+      allConversations: all,
+      conversations: visibleOf(all, mode),
       activeId: conv.id,
-      tabIds: [...s.tabIds.filter((id) => id !== conv.id), conv.id],
-    }));
+      tabIds,
+      activeByMode: { ...s.activeByMode, [mode]: conv.id },
+      tabsByMode: { ...s.tabsByMode, [mode]: tabIds },
+    });
     return conv;
   },
 
@@ -195,6 +330,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     const charStore = useCharacterStore.getState();
     const card = charStore.characters.find((c) => c.id === characterId);
     if (!card) return get().create();
+    const mode = get().workSubMode;
     const personaId = opts?.personaId ?? charStore.activePersonaId;
     const conv: Conversation = {
       id: generateId(),
@@ -205,6 +341,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       messages: [],
       character_id: characterId,
       persona_id: personaId || undefined,
+      work_mode: mode,
     };
     await dbCreateConv({
       id: conv.id,
@@ -215,6 +352,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       updated_at: conv.updated_at,
       character_id: characterId,
       persona_id: personaId || "",
+      work_mode: mode,
     });
 
     // 开场白:first_mes({{user}}/{{char}} 替换后)作为首条 assistant 消息
@@ -243,44 +381,76 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       );
     }
 
-    set((s) => ({
-      conversations: [conv, ...s.conversations],
+    const s = get();
+    const all = [conv, ...allOf(s)];
+    const tabIds = [...s.tabIds.filter((id) => id !== conv.id), conv.id];
+    persistActive(mode, conv.id);
+    set({
+      allConversations: all,
+      conversations: visibleOf(all, mode),
       activeId: conv.id,
-      tabIds: [...s.tabIds.filter((id) => id !== conv.id), conv.id],
-    }));
+      tabIds,
+      activeByMode: { ...s.activeByMode, [mode]: conv.id },
+      tabsByMode: { ...s.tabsByMode, [mode]: tabIds },
+    });
     return conv;
   },
 
   remove: async (id) => {
+    const s = get();
     await dbDeleteConv(id);
-    set((s) => {
-      const conversations = s.conversations.filter((c) => c.id !== id);
-      const tabIds = s.tabIds.filter((tid) => tid !== id);
-      return {
-        conversations,
-        tabIds,
-        activeId: s.activeId === id ? tabIds[0] || null : s.activeId,
-      };
+    const all = allOf(s).filter((c) => c.id !== id);
+    const tabIds = s.tabIds.filter((tid) => tid !== id);
+    const activeId = s.activeId === id ? tabIds[0] || null : s.activeId;
+    persistActive(s.workSubMode, activeId);
+    set({
+      ...withAll(s, all),
+      tabIds,
+      activeId,
+      activeByMode: { ...s.activeByMode, [s.workSubMode]: activeId },
+      tabsByMode: { ...s.tabsByMode, [s.workSubMode]: tabIds },
     });
   },
 
-  setActive: (id) => set({ activeId: id }),
-  openTab: (id) =>
-    set((s) => ({ tabIds: s.tabIds.includes(id) ? s.tabIds : [...s.tabIds, id], activeId: id })),
-  closeTab: (id) =>
-    set((s) => {
-      const tabIds = s.tabIds.filter((tid) => tid !== id);
-      return {
-        tabIds,
-        activeId: s.activeId === id ? tabIds[tabIds.length - 1] || null : s.activeId,
-      };
-    }),
+  setActive: (id) => {
+    const s = get();
+    persistActive(s.workSubMode, id);
+    set({
+      activeId: id,
+      activeByMode: { ...s.activeByMode, [s.workSubMode]: id },
+    });
+  },
+
+  openTab: (id) => {
+    const s = get();
+    const tabIds = s.tabIds.includes(id) ? s.tabIds : [...s.tabIds, id];
+    persistActive(s.workSubMode, id);
+    set({
+      tabIds,
+      activeId: id,
+      activeByMode: { ...s.activeByMode, [s.workSubMode]: id },
+      tabsByMode: { ...s.tabsByMode, [s.workSubMode]: tabIds },
+    });
+  },
+
+  closeTab: (id) => {
+    const s = get();
+    const tabIds = s.tabIds.filter((tid) => tid !== id);
+    const activeId = s.activeId === id ? tabIds[tabIds.length - 1] || null : s.activeId;
+    persistActive(s.workSubMode, activeId);
+    set({
+      tabIds,
+      activeId,
+      activeByMode: { ...s.activeByMode, [s.workSubMode]: activeId },
+      tabsByMode: { ...s.tabsByMode, [s.workSubMode]: tabIds },
+    });
+  },
 
   addMessage: async (convId, msg) => {
     // seq: monotonic per-conversation insertion order — timestamps alone are
     // not enough (a 一问多答 turn creates N assistant messages in the same
     // millisecond, so restart would scramble their order).
-    const conv = get().conversations.find((c) => c.id === convId);
+    const conv = allOf(get()).find((c) => c.id === convId);
     const seq = (conv ? Math.max(0, ...conv.messages.map((m) => m.seq ?? 0)) : 0) + 1;
     await dbAddMsg(toMsgDto(msg, convId, seq));
     if (conv) {
@@ -297,13 +467,15 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         updated_at: conv.updated_at,
         character_id: conv.character_id || "",
         persona_id: conv.persona_id || "",
+        // 整条重写会话记录：必须带上原 work_mode，否则 chat 会话会被默认值改回 work
+        work_mode: convWorkMode(conv),
       });
-      set((s) => ({ conversations: [...s.conversations] }));
+      set((s) => withAll(s, allOf(s)));
     }
   },
 
   addMessagesBatch: async (convId, msgs) => {
-    const conv = get().conversations.find((c) => c.id === convId);
+    const conv = allOf(get()).find((c) => c.id === convId);
     const base = conv ? Math.max(0, ...conv.messages.map((m) => m.seq ?? 0)) : 0;
     const updated = msgs.map((m, i) => ({ ...m, seq: base + i + 1 }));
     await dbBatchAddMessages(
@@ -319,14 +491,14 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         if (firstUser) conv.title = firstUser.content.slice(0, 50);
       }
       conv.updated_at = nowISO();
-      set((s) => ({ conversations: [...s.conversations] }));
+      set((s) => withAll(s, allOf(s)));
     }
   },
 
   updateMessage: async (convId, msgId, content) => {
     await dbUpdateMsgContent(msgId, convId, content);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -334,14 +506,15 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               messages: c.messages.map((m) => (m.id === msgId ? { ...m, content } : m)),
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   updateMessageReasoning: async (convId, msgId, reasoning) => {
     await dbUpdateMsgReasoning(msgId, convId, reasoning);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -349,14 +522,15 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               messages: c.messages.map((m) => (m.id === msgId ? { ...m, reasoning } : m)),
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   updateMessageError: async (convId, msgId, error, errorKind = "") => {
     await dbUpdateMsgError(msgId, convId, error, errorKind);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -366,38 +540,47 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               ),
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   /** 消息书签:切换单条消息书签状态(长会话快速跳回) */
   toggleBookmark: async (convId, msgId) => {
-    const conv = get().conversations.find((c) => c.id === convId);
+    const conv = allOf(get()).find((c) => c.id === convId);
     const msg = conv?.messages.find((m) => m.id === msgId);
     if (!conv || !msg) return;
     const next = !msg.bookmarked;
     await dbSetMsgBookmark(msgId, convId, next);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
               messages: c.messages.map((m) => (m.id === msgId ? { ...m, bookmarked: next } : m)),
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   /** 批量删除会话:一次 IPC 删除多个会话(替代 N 次单删往返) */
   removeMany: async (ids) => {
     if (ids.length === 0) return;
+    const s = get();
     await dbBatchDeleteConvs(ids);
-    set((s) => ({
-      conversations: s.conversations.filter((c) => !ids.includes(c.id)),
-      activeId: s.activeId && ids.includes(s.activeId) ? null : s.activeId,
-      tabIds: s.tabIds.filter((id) => !ids.includes(id)),
-    }));
+    const all = allOf(s).filter((c) => !ids.includes(c.id));
+    const tabIds = s.tabIds.filter((id) => !ids.includes(id));
+    const activeId = s.activeId && ids.includes(s.activeId) ? null : s.activeId;
+    persistActive(s.workSubMode, activeId);
+    set({
+      ...withAll(s, all),
+      tabIds,
+      activeId,
+      activeByMode: { ...s.activeByMode, [s.workSubMode]: activeId },
+      tabsByMode: { ...s.tabsByMode, [s.workSubMode]: tabIds },
+    });
   },
 
   /** 批量归档/取消归档:切换多个会话的归档状态(localStorage,与单条一致) */
@@ -414,8 +597,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   removeLastAssistantMessage: async (convId) => {
     await dbDeleteLastAsmMsg(convId);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -424,8 +607,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               ),
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   replaceMessages: async (convId, seed) => {
@@ -437,8 +621,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       "New Chat",
       nowISO()
     );
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -446,16 +630,17 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               messages: updated,
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   clearConversation: async (convId) => {
     await dbClearMessages(convId);
     const now = nowISO();
     await dbRenameConv(convId, "New Chat", now);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId
           ? {
               ...c,
@@ -464,30 +649,32 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
               title: "New Chat",
             }
           : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
   rename: async (id, title) => {
-    const conv = get().conversations.find((c) => c.id === id);
+    const conv = allOf(get()).find((c) => c.id === id);
     if (!conv) return;
     conv.title = title;
     conv.updated_at = nowISO();
     await dbRenameConv(id, title, conv.updated_at);
-    set((s) => ({ conversations: [...s.conversations] }));
+    set((s) => withAll(s, allOf(s)));
   },
 
   updateSummary: async (convId, summary, summaryMsgCount) => {
     const now = nowISO();
     await dbUpdateConvSummary(convId, summary, summaryMsgCount, now);
-    set((s) => ({
-      conversations: s.conversations.map((c) =>
+    set((s) => {
+      const all = allOf(s).map((c) =>
         c.id === convId ? { ...c, summary, summary_msg_count: summaryMsgCount } : c
-      ),
-    }));
+      );
+      return withAll(s, all);
+    });
   },
 
-  getActive: () => get().conversations.find((c) => c.id === get().activeId),
+  getActive: () => allOf(get()).find((c) => c.id === get().activeId),
 
   // Favorites & Archive (stored in localStorage)
   favorites: JSON.parse(localStorage.getItem("fav_convs") || "[]") as string[],

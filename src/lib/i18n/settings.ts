@@ -1,9 +1,12 @@
 // lib/i18n/settings.ts — 由 i18n.ts 按 key 前缀拆出（自动生成，勿手工搬运 key）
-// 条目数：211
+// 条目数：217
 
 export const settingsMessages: Record<string, Record<string, string>> = {
   // ── Settings ──
   "settings.title": { zh: "设置", en: "Settings" },
+  // 工作区两套设置值互相独立，标题标明当前在编辑哪一套
+  "settings.workChatTitle": { zh: "设置 · 对话", en: "Settings · Chat" },
+  "settings.workWorkTitle": { zh: "设置 · 工作", en: "Settings · Work" },
   "settings.tavernTitle": { zh: "酒馆设置", en: "Tavern Settings" },
   "settings.simTitle": { zh: "推演设置", en: "Simulation Settings" },
   "settings.simulate": { zh: "推演", en: "Simulation" },
@@ -305,6 +308,16 @@ export const settingsMessages: Record<string, Record<string, string>> = {
   "mcp.invalidJson": { zh: "参数不是合法 JSON", en: "Args are not valid JSON" },
   "mcp.emptyResult": { zh: "(空结果)", en: "(empty result)" },
   "mcp.error": { zh: "错误: {e}", en: "Error: {e}" },
+  "mcp.liteTool": { zh: "对话可用", en: "Chat available" },
+  "mcp.liteServer": { zh: "整服务器对话可用", en: "Whole server in chat" },
+  "mcp.liteServerHint": {
+    zh: '勾选后该服务器下所有工具在对话模式可用（写入 tool="*"）',
+    en: 'Allow every tool on this server in Chat mode (stored as tool="*")',
+  },
+  "mcp.liteSaveFail": {
+    zh: "保存对话白名单失败: {e}",
+    en: "Failed to save Chat whitelist: {e}",
+  },
   // ── Data / Backup ──
   "data.localBackup": { zh: "本地备份", en: "Local Backup" },
   "data.backupDirPlaceholder": { zh: "备份目录（默认 {dir}）", en: "Backup dir (default {dir})" },

@@ -377,6 +377,8 @@ pub fn run() {
             commands::mcp::mcp_list_grants,
             commands::mcp::mcp_audit,
             commands::mcp::mcp_resolve_permission,
+            commands::mcp::mcp_set_lite_tool,
+            commands::mcp::mcp_list_lite_tools,
             commands::docs::pick_file,
             commands::docs::extract_document_text,
             commands::docs::ocr_image,

@@ -42,6 +42,7 @@ export function Header({ settingsOpen, onOpenSettings, onCloseSettings }: Props)
   const mode = useAppModeStore((s) => s.mode);
   const setMode = useAppModeStore((s) => s.setMode);
   const subMode = useAppModeStore((s) => s.tavernSubMode);
+  const workSubMode = useAppModeStore((s) => s.workSubMode);
 
   // Active provider → get its sub-models
   const activeProvider = models.find((m) => m.name === activeModel);
@@ -253,8 +254,14 @@ export function Header({ settingsOpen, onOpenSettings, onCloseSettings }: Props)
         </button>
       </header>
 
-      {/* key={mode}:切换工作/酒馆时重挂载,tab 默认值按新模式初始化(替代 effect 重置) */}
-      <SettingsDialog key={mode} open={settingsOpen} onClose={onCloseSettings} />
+      {/* key={mode}:{workSubMode}:切换工作/酒馆、或工作区 对话/工作 子模式时重挂载,
+          让弹窗里的 useState 表单值与 tab 默认值按新 scope 初始化(替代 effect 重置)。
+          子模式也必须进 key —— 否则切过子模式再打开设置,表单仍是启动时那套值。 */}
+      <SettingsDialog
+        key={`${mode}:${workSubMode}`}
+        open={settingsOpen}
+        onClose={onCloseSettings}
+      />
     </>
   );
 }

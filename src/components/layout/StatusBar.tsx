@@ -16,20 +16,27 @@ export function StatusBar() {
   const simStreaming = useSimulationStore((s) => s.isStreaming);
   const view = useViewStore((s) => s.view);
   const mode = useAppModeStore((s) => s.mode);
-  const subMode = useAppModeStore((s) => s.tavernSubMode);
+  const tavernSubMode = useAppModeStore((s) => s.tavernSubMode);
+  const workSubMode = useAppModeStore((s) => s.workSubMode);
 
   const model = models.find((m) => m.name === activeModel);
   const streaming = isStreaming || tavernStreaming || simStreaming;
   const statusDot = streaming ? "bg-[#1E80CF]" : "bg-[#27AE60]"; // 运行中=蓝 / 就绪=绿
-  // 酒馆模式按子模式显示(角色扮演/推演),不显示工作视图名(防混淆)
+  // 酒馆模式按子模式显示(角色扮演/推演),不显示工作视图名(防混淆)。
+  // 工作模式同理:子模式(对话/工作)是更高层,先显示它;翻译/绘图工作区
+  // 是具体视图,附在其后(如「工作 · 绘图工作区」);纯对话区不重复显示。
+  const workView =
+    view === "translation"
+      ? t("status.viewTranslate")
+      : view === "drawing"
+        ? t("status.viewDraw")
+        : null;
   const viewName =
     mode === "tavern"
-      ? t(subMode === "simulate" ? "appMode.tavernSub.simulate" : "appMode.tavernSub.rp")
-      : view === "chat"
-        ? t("status.viewChat")
-        : view === "translation"
-          ? t("status.viewTranslate")
-          : t("status.viewDraw");
+      ? t(tavernSubMode === "simulate" ? "appMode.tavernSub.simulate" : "appMode.tavernSub.rp")
+      : workView
+        ? `${t(workSubMode === "chat" ? "workSub.chat" : "workSub.work")} · ${workView}`
+        : t(workSubMode === "chat" ? "workSub.chat" : "workSub.work");
 
   return (
     <footer className="flex items-center gap-2 px-3 h-8 bg-[#2C3E50] shrink-0 text-[#8899A6]">

@@ -11,12 +11,13 @@
 // ⚠️ 口径：这里测的是**回调被调用**（行为），不是像素或样式。
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, fireEvent, cleanup } from "@testing-library/react";
+import { render, fireEvent, cleanup, screen, act } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve()) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn(() => Promise.resolve()) }));
 
 import { Header } from "./Header";
+import { useAppModeStore } from "@/stores/useAppModeStore";
 
 afterEach(cleanup);
 
@@ -48,5 +49,29 @@ describe("Header「设置」按钮是开关", () => {
     fireEvent.click(settingsButton());
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onOpen).not.toHaveBeenCalled();
+  });
+});
+
+// 2026-10-23 跨 scope 串值修复的 Header 侧断言：
+//   原先 key={mode} 只在 工作/酒馆 之间重挂，切换 对话/工作 子模式时弹窗不重挂，
+//   表单里 useState 捕获的仍是旧 scope 值（SettingsDialog 侧的补丁见
+//   SettingsDialog.scope-sync.test.tsx）。
+//   这里用「切换子模式后 tab 回到默认『模型』」证明弹窗确实重挂载了 ——
+//   tab 是组件内部 state，不重挂就不会自己回去。
+describe("Header 常驻挂载的设置弹窗随工作子模式重挂载", () => {
+  it("切到对话子模式后，弹窗重挂、tab 回到默认「模型」", () => {
+    useAppModeStore.setState({ mode: "work", workSubMode: "work", tavernSubMode: "rp" });
+    render(<Header settingsOpen onOpenSettings={vi.fn()} onCloseSettings={vi.fn()} />);
+
+    fireEvent.click(screen.getByText("通用", { selector: "button" }));
+    const selected = () =>
+      Array.from(document.querySelectorAll("button")).find((b) =>
+        b.className.includes("border-primary")
+      )?.textContent;
+    expect(selected()).toBe("通用");
+
+    act(() => useAppModeStore.getState().setWorkSubMode("chat"));
+
+    expect(selected()).toBe("模型");
   });
 });

@@ -2,13 +2,15 @@ import { useState, useCallback, useMemo, useRef } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useConversationStore } from "@/stores/useConversationStore";
+import { useAppModeStore, type WorkSubMode } from "@/stores/useAppModeStore";
 import { useChatStore } from "@/stores/useChatStore";
+import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useCharacterStore } from "@/stores/useCharacterStore";
 import { useKnowledgeStore } from "@/stores/useKnowledgeStore";
 import { getAppDir, writeFile } from "@/lib/tauri";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
-import { Download, Search, Hash, Trash2, ArrowDown, BookOpen } from "lucide-react";
+import { Download, Search, Hash, Trash2, ArrowDown, BookOpen, MessageSquare } from "lucide-react";
 import { countConversationTokens, formatTokens } from "@/lib/token-counter";
 import { useT } from "@/lib/i18n";
 import { showToast } from "@/components/ui/Toast";
@@ -83,6 +85,22 @@ export function ChatView() {
   const streamingReasoning = useChatStore((s) => s.streamingReasoning);
   const streamErrors = useChatStore((s) => s.streamErrors);
   const streamMsgMap = useChatStore((s) => s.streamMsgMap);
+  // 工作子模式:对话 / 工作(持久化;切换时由会话层恢复对应会话)
+  const workSubMode = useAppModeStore((s) => s.workSubMode);
+  const setWorkSubMode = useAppModeStore((s) => s.setWorkSubMode);
+  const handleSwitchSubMode = useCallback(
+    (m: WorkSubMode) => {
+      // 已在该模式且有会话:点高亮项不重复恢复(避免无谓的重建/切会话)。
+      // 同模式但无 activeId(如刚删完会话)仍放行,交给 applyWorkSubMode 恢复。
+      if (m === workSubMode && activeId) return;
+      setWorkSubMode(m);
+      // 设置值也按子模式隔离：切到哪一套就把顶层字段换成哪一套的值
+      useSettingsStore.getState().applyScope(m);
+      // 会话层负责:切到该模式可见列表、恢复各自历史 activeId(无 activeId 时恢复/新建)
+      useConversationStore.getState().applyWorkSubMode(m);
+    },
+    [workSubMode, activeId, setWorkSubMode]
+  );
   const [searchTerm, setSearchTerm] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [quoted, setQuoted] = useState<Message | null>(null);
@@ -321,6 +339,23 @@ export function ChatView() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* 工作子模式切换条:对话 / 工作(会话隔离,选择持久化;样式对齐酒馆子模式条) */}
+      <div className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-muted/40 shrink-0">
+        <MessageSquare className="w-3.5 h-3.5 text-primary mr-1" />
+        <button
+          onClick={() => handleSwitchSubMode("chat")}
+          className={`px-3 py-1 text-xs rounded-md transition-colors ${workSubMode === "chat" ? "bg-primary text-primary-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          {t("workSub.chat")}
+        </button>
+        <button
+          onClick={() => handleSwitchSubMode("work")}
+          className={`px-3 py-1 text-xs rounded-md transition-colors ${workSubMode === "work" ? "bg-primary text-primary-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          {t("workSub.work")}
+        </button>
+      </div>
+
       {/* 角色信息条(角色扮演会话) */}
       {rpContext && (
         <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border bg-primary/5 shrink-0">

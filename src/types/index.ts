@@ -122,6 +122,10 @@ export interface ConnectionProfile {
 }
 
 // ── Conversation ─────────────────────────────────────────
+/** 工作区子模式：chat=对话（轻量）/ work=工作（完整能力）。
+ *  与 useAppModeStore.WorkSubMode 结构一致；类型层不反向依赖 store。 */
+export type WorkSubMode = "chat" | "work";
+
 export interface Conversation {
   id: string;
   title: string;
@@ -139,6 +143,9 @@ export interface Conversation {
   summary?: string | undefined;
   /** 自动记忆(工作模式):摘要时的消息数记账,距上次总结新增消息数判定 */
   summary_msg_count?: number | undefined;
+  /** 会话归属的工作子模式。旧数据/旧导入件没有该字段 → 按 "work" 处理
+   *  （后端 serde default + 前端 convWorkMode 双向兜底）。 */
+  work_mode?: WorkSubMode | undefined;
 }
 
 // ── Character cards (角色扮演 / 酒馆风格) ────────────────
@@ -400,6 +407,11 @@ export interface Skill {
   tools_json?: string;
   /** 绑定的记忆标签 JSON 数组字符串（Agent 记忆） */
   memory_tags?: string;
+  /**
+   * 对话模式可用（默认 false）。仅在「工作」子模式的 `chat` 下参与技能过滤；
+   * 旧技能升级后没有该字段 → 视为不可用，需显式勾选。
+   */
+  lite_enabled?: boolean;
 }
 
 // ── Knowledge Base ───────────────────────────────────────
@@ -549,6 +561,8 @@ export interface DbConvDto {
   summary?: string;
   /** 摘要时的消息数记账(距上次总结新增消息数判定) */
   summary_msg_count?: number;
+  /** 会话归属的工作子模式；旧库/旧导入件缺字段时后端返回 "work" */
+  work_mode?: WorkSubMode;
 }
 
 export interface DbMsgDto {
@@ -591,6 +605,8 @@ export interface DbSkillDto {
   updated_at: string;
   tools_json?: string;
   memory_tags?: string;
+  /** 对话模式可用；Rust 侧缺省 false */
+  lite_enabled?: boolean;
 }
 
 export interface McpServerDto {

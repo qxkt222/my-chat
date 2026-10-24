@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   Send,
   Square,
@@ -10,6 +10,8 @@ import {
   Sparkles,
   Package,
 } from "lucide-react";
+import { useAppModeStore, type AppMode, type WorkSubMode } from "@/stores/useAppModeStore";
+import { showToast } from "@/components/ui/Toast";
 import { useChatStore } from "@/stores/useChatStore";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useConversationStore } from "@/stores/useConversationStore";
@@ -18,11 +20,18 @@ import { useSkillStore } from "@/stores/useSkillStore";
 import { useMemoryStore } from "@/stores/useMemoryStore";
 import { pluginAPI } from "@/plugin/PluginHost";
 import { SLASH_COMMANDS } from "@/plugin/commands";
-import { mcpListServers, ragSearch, ragRerank, logDiag, type RagResult } from "@/lib/tauri";
+import {
+  mcpListServers,
+  mcpListLiteTools,
+  ragSearch,
+  ragRerank,
+  logDiag,
+  type RagResult,
+} from "@/lib/tauri";
 import { useT } from "@/lib/i18n";
 import { countTokens } from "@/lib/token-counter";
 import { detectChainTrigger, detectMentionQuery } from "./input-triggers";
-import { runMcpChain, runMcpStep } from "./mcp-step";
+import { createLiteAllowStep, runMcpChain, runMcpStep, type AllowStep } from "./mcp-step";
 import { AtMentionMenu, type MentionSelection, type AtMentionMenuHandle } from "./AtMentionMenu";
 import { setCodeInsertHandler } from "@/lib/code-insert";
 import { loadChains, runPromptChain, type PromptChain } from "@/lib/prompt-chain";
@@ -31,6 +40,44 @@ import type { Message, Skill, ModelWrapper } from "@/types";
 interface Props {
   quoted?: Message | null;
   onClearQuote?: () => void;
+}
+
+/** 输入区可用的能力集合 */
+export interface ChatCapabilities {
+  skills: boolean;
+  knowledge: boolean;
+  mcp: boolean;
+  projectInstructions: boolean;
+  compare: boolean;
+}
+
+const FULL_CAPABILITIES: ChatCapabilities = {
+  skills: true,
+  knowledge: true,
+  mcp: true,
+  projectInstructions: true,
+  compare: true,
+};
+
+const LITE_CAPABILITIES: ChatCapabilities = {
+  // 技能 / 知识库 / MCP 在对话模式都「可用但受限」：
+  // 技能仅 lite_enabled、MCP 仅白名单；知识库 RAG 完全恢复。
+  skills: true,
+  knowledge: true,
+  mcp: true,
+  projectInstructions: false,
+  compare: false,
+};
+
+/**
+ * 工作区子模式 → 能力集合。
+ * 「对话」= 轻量：技能仅 lite_enabled、MCP 仅白名单、知识库可用、无项目指令、无多模型对比；
+ * 「工作」= 全能力。酒馆模式不参与该判定（保持原有逻辑，即使 workSubMode 有残留值）。
+ */
+export function capabilitiesFor(mode: AppMode, workSubMode: WorkSubMode): ChatCapabilities {
+  return mode === "work" && workSubMode === "chat"
+    ? { ...LITE_CAPABILITIES }
+    : { ...FULL_CAPABILITIES };
 }
 
 export function ChatInput({ quoted, onClearQuote }: Props) {
@@ -64,6 +111,8 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   const [wrapperPick, setWrapperPick] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionRef = useRef<AtMentionMenuHandle>(null);
+  // 对话子模式 = 轻量；只认 mode=work，酒馆模式完全不走这条判定
+  const isLite = useAppModeStore((s) => s.mode === "work" && s.workSubMode === "chat");
   const isStreaming = useChatStore((s) => s.isStreaming);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancelGeneration = useChatStore((s) => s.cancelGeneration);
@@ -73,6 +122,11 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   const activeModel = useSettingsStore((s) => s.activeModel);
   const modelWrappers = useSettingsStore((s) => s.modelWrappers);
   const skills = useSkillStore((s) => s.skills);
+  // 对话子模式只允许显式勾选「对话可用」的技能；其余列表与选择器一律用这份过滤结果
+  const visibleSkills = useMemo(
+    () => (isLite ? skills.filter((s) => s.lite_enabled === true) : skills),
+    [isLite, skills]
+  );
   const activeBaseId = useKnowledgeStore((s) => s.activeBaseId);
   const setActiveKb = useKnowledgeStore((s) => s.setActive);
 
@@ -135,16 +189,25 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
 
       // MCP tool chain: /mcp <server> <tool> [argsJson] :: <tool2> [argsJson] :: ...
       // 步骤解析与顺序执行已抽到 ./mcp-step.ts 的 runMcpChain
-      if (cmdRaw.toLowerCase() === "mcp" && args) {
-        try {
-          result = await runMcpChain(args, setStage);
-        } catch (e) {
-          result = `${t("chat.mcpCallFailed")}${e}`;
-        } finally {
-          setToolStatus(null);
+      if (cmdRaw.toLowerCase() === "mcp") {
+        if (args) {
+          try {
+            if (isLite) {
+              // 对话模式：只放行 mcpListLiteTools() 白名单内的 (server.id, tool)。
+              // 白名单为空 → 每一步都被拒绝并返回明确说明，且不发起 MCP IPC。
+              const allowStep = createLiteAllowStep(await mcpListLiteTools());
+              result = await runMcpChain(args, setStage, allowStep);
+            } else {
+              result = await runMcpChain(args, setStage);
+            }
+          } catch (e) {
+            result = `${t("chat.mcpCallFailed")}${e}`;
+          } finally {
+            setToolStatus(null);
+          }
+        } else {
+          result = t("chat.mcpUsage");
         }
-      } else if (cmdRaw.toLowerCase() === "mcp") {
-        result = t("chat.mcpUsage");
       }
 
       if (result === null) {
@@ -184,6 +247,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     // Build RAG context if enabled(结构化检索:候选片段 + rerank 重排 + 来源卡)
+    // 知识库在对话子模式同样可用（能力矩阵：两种子模式都保留 RAG）
     let knowledgeContext: string | undefined;
     let sources: RagResult[] = [];
     if (ragEnabled && activeBaseId) {
@@ -235,29 +299,34 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     onClearQuote?.();
 
     // 三层指令作用域(全局 < 项目/知识库 < 会话):合并后作为 systemPrompt 基础
+    // 对话子模式：技能仅 lite_enabled 可用，项目指令不应用
+    // （全局指令/会话提示词属于用户既有上下文，保留）
+    const activeSkill = isLite ? (skill && skill.lite_enabled ? skill : null) : skill;
     const activeConv = convStore.getActive();
     const settingsState = useSettingsStore.getState();
-    let systemPrompt = skill?.systemPrompt || activeConv?.system_prompt || undefined;
+    let systemPrompt = activeSkill?.systemPrompt || activeConv?.system_prompt || undefined;
     // 会话级系统提示词优先,否则按作用域合并:全局指令 + 命中当前知识库的项目指令
     if (!systemPrompt) {
       const scoped: string[] = [];
       if (settingsState.globalInstruction.trim()) {
         scoped.push(settingsState.globalInstruction.trim());
       }
-      const proj = settingsState.projectInstructions.filter(
-        (p) => !p.kbId || p.kbId === activeBaseId
-      );
-      for (const p of proj) {
-        if (p.instruction.trim()) scoped.push(p.instruction.trim());
+      if (!isLite) {
+        const proj = settingsState.projectInstructions.filter(
+          (p) => !p.kbId || p.kbId === activeBaseId
+        );
+        for (const p of proj) {
+          if (p.instruction.trim()) scoped.push(p.instruction.trim());
+        }
       }
       if (scoped.length > 0) systemPrompt = scoped.join("\n\n");
     }
 
     // Agent 记忆：技能绑定的记忆标签 → 注入长期记忆（稳定前缀，缓存友好）
-    if (skill) {
+    if (activeSkill) {
       const memText = useMemoryStore
         .getState()
-        .byTags(JSON.parse(skill.memory_tags || "[]") as string[]);
+        .byTags(JSON.parse(activeSkill.memory_tags || "[]") as string[]);
       if (memText) {
         systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memText}` : memText;
       }
@@ -265,9 +334,19 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
 
     // Agent 工具：技能绑定的 MCP 工具（tools_json = ["server/tool", ...]）→ 真实调用，
     // 结果注入 systemPrompt（此前 tools_json 从不执行，绑定工具是死字段）
-    if (skill?.tools_json) {
+    if (activeSkill?.tools_json) {
       try {
-        const toolRefs = JSON.parse(skill.tools_json) as string[];
+        // 对话模式：技能绑定的工具同样受白名单约束（按 server.id 匹配）。
+        // 白名单拉取失败按「全拒」处理 —— fail-closed，宁可不调也不越权。
+        let allowStep: AllowStep | undefined;
+        if (isLite) {
+          try {
+            allowStep = createLiteAllowStep(await mcpListLiteTools());
+          } catch {
+            allowStep = () => false;
+          }
+        }
+        const toolRefs = JSON.parse(activeSkill.tools_json) as string[];
         const servers = await mcpListServers();
         const outputs: string[] = [];
         let prev = "";
@@ -278,7 +357,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
           );
           if (!server || !toolName) continue;
           try {
-            const out = await runMcpStep(server, toolName.trim(), "", prev);
+            const out = await runMcpStep(server, toolName.trim(), "", prev, allowStep);
             outputs.push(`【工具 ${server.name}/${toolName.trim()}】\n${out}`);
             prev = out;
           } catch (e) {
@@ -320,18 +399,28 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     // stableSystem 前缀恒定、世界书/摘要尾部),这里只保留基础提示词(技能/记忆/会话 prompt)
     void activeConv?.character_id;
 
-    let targetModels = [
-      model,
-      ...compareList.map((m) => ({
-        name: m.name,
-        api_url: m.api_url,
-        api_key: m.api_key,
-        model: m.model,
-      })),
-    ];
+    // 对话子模式无多模型对比能力：只发当前模型
+    let targetModels = isLite
+      ? [
+          {
+            name: model.name,
+            api_url: model.api_url,
+            api_key: model.api_key,
+            model: model.model,
+          },
+        ]
+      : [
+          model,
+          ...compareList.map((m) => ({
+            name: m.name,
+            api_url: m.api_url,
+            api_key: m.api_key,
+            model: m.model,
+          })),
+        ];
     // A skill can pin a specific model; otherwise send to active + compare models
-    if (skill?.model) {
-      const pinned = models.find((m) => m.name === skill.model);
+    if (activeSkill?.model) {
+      const pinned = models.find((m) => m.name === activeSkill.model);
       if (pinned)
         targetModels = [
           {
@@ -343,8 +432,11 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
         ];
     }
     // F2: 技能可覆写温度（如「严谨代码」用低温）——发送时注入目标模型配置
-    if (skill?.temperature != null) {
-      targetModels = targetModels.map((m) => ({ ...m, temperature: skill.temperature as number }));
+    if (activeSkill?.temperature != null) {
+      targetModels = targetModels.map((m) => ({
+        ...m,
+        temperature: activeSkill.temperature as number,
+      }));
     }
 
     await sendMessage(finalContent, targetModels, systemPrompt, knowledgeContext);
@@ -365,6 +457,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     ragRerankEnabled,
     ragMode,
     models,
+    isLite,
     t,
   ]);
 
@@ -407,7 +500,12 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
     (sel: MentionSelection) => {
       if (sel.kind === "skill") {
         const s = skills.find((x) => x.id === sel.id);
-        if (s) setSkill(s);
+        // 菜单在 lite 下已过滤；这里再兜一层，防止状态残留让非 lite 技能漏过
+        if (s && isLite && s.lite_enabled !== true) {
+          showToast("info", t("chat.skillLiteUnsupported"));
+        } else if (s) {
+          setSkill(s);
+        }
       } else if (sel.kind === "command") {
         // /命令 直接填入输入框
         setInput((p) => p.replace(/@\S*$/, "") + `/${sel.id} `);
@@ -426,7 +524,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
       setMentionHighlight(0);
       textareaRef.current?.focus();
     },
-    [skills, setActiveKb]
+    [skills, setActiveKb, isLite, t]
   );
 
   /** 输入变化:检测 @ 触发菜单 + `..` 触发 prompt 链（判定逻辑在 ./input-triggers.ts） */
@@ -501,7 +599,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
       <div className="max-w-3xl mx-auto flex gap-2 items-end">
         <div className="flex-1 relative">
           {/* Pending skill preview (injects system prompt on send) */}
-          {skill && (
+          {skill && (!isLite || skill.lite_enabled === true) && (
             <div className="mb-1.5 flex items-center gap-2 px-2 py-1.5 rounded-md border border-primary/30 bg-primary/5 text-xs">
               <Sparkles className="w-3 h-3 text-primary shrink-0" />
               <div className="flex-1 min-w-0">
@@ -555,6 +653,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
               highlight={mentionHighlight}
               onHighlightChange={setMentionHighlight}
               onSelect={handleMentionSelect}
+              skillsOverride={visibleSkills}
             />
           )}
           {/* prompt 链选择器(`..` 触发,多步工作流) */}
@@ -660,22 +759,24 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
             </button>
           ) : (
             <>
-              <button
-                onClick={() => setShowCompare(!showCompare)}
-                disabled={models.length < 2}
-                className={`p-2 rounded-md border transition-colors disabled:opacity-30 ${
-                  compareModels.length > 0
-                    ? "bg-primary/20 border-primary text-primary"
-                    : "border-input bg-background text-muted-foreground hover:text-foreground"
-                }`}
-                title={
-                  compareModels.length > 0
-                    ? t("chat.compareCount", { n: 1 + compareList.length })
-                    : t("chat.compareTitle")
-                }
-              >
-                <Layers className="w-4 h-4" />
-              </button>
+              {!isLite && (
+                <button
+                  onClick={() => setShowCompare(!showCompare)}
+                  disabled={models.length < 2}
+                  className={`p-2 rounded-md border transition-colors disabled:opacity-30 ${
+                    compareModels.length > 0
+                      ? "bg-primary/20 border-primary text-primary"
+                      : "border-input bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={
+                    compareModels.length > 0
+                      ? t("chat.compareCount", { n: 1 + compareList.length })
+                      : t("chat.compareTitle")
+                  }
+                >
+                  <Layers className="w-4 h-4" />
+                </button>
+              )}
               <button
                 onClick={() => setRagEnabled(!ragEnabled)}
                 disabled={!activeBaseId}
@@ -696,9 +797,9 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
               </button>
               <button
                 onClick={() => setShowSkills(!showSkills)}
-                disabled={skills.length === 0}
+                disabled={visibleSkills.length === 0}
                 className={`p-2 rounded-md border transition-colors disabled:opacity-30 ${
-                  skill
+                  skill && (!isLite || skill.lite_enabled === true)
                     ? "bg-primary/20 border-primary text-primary"
                     : "border-input bg-background text-muted-foreground hover:text-foreground"
                 }`}
@@ -706,18 +807,20 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
               >
                 <Sparkles className="w-4 h-4" />
               </button>
-              <button
-                onClick={() => setWrapperPick(!wrapperPick)}
-                disabled={modelWrappers.length === 0}
-                className={`p-2 rounded-md border transition-colors disabled:opacity-30 ${
-                  wrapperPick
-                    ? "bg-primary/20 border-primary text-primary"
-                    : "border-input bg-background text-muted-foreground hover:text-foreground"
-                }`}
-                title={t("chat.wrapper")}
-              >
-                <Package className="w-4 h-4" />
-              </button>
+              {!isLite && (
+                <button
+                  onClick={() => setWrapperPick(!wrapperPick)}
+                  disabled={modelWrappers.length === 0}
+                  className={`p-2 rounded-md border transition-colors disabled:opacity-30 ${
+                    wrapperPick
+                      ? "bg-primary/20 border-primary text-primary"
+                      : "border-input bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={t("chat.wrapper")}
+                >
+                  <Package className="w-4 h-4" />
+                </button>
+              )}
               <button
                 onClick={() => useChatStore.getState().compressContext()}
                 disabled={!model}
@@ -811,7 +914,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
       )}
 
       {/* Compare (一问多答) model picker */}
-      {showCompare && models.length > 1 && (
+      {!isLite && showCompare && models.length > 1 && (
         <div className="max-w-3xl mx-auto mt-2 flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-muted-foreground">{t("chat.compare")}</span>
           <span className="px-2 py-0.5 rounded bg-primary/20 border border-primary text-primary">
@@ -844,11 +947,11 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
         </div>
       )}
 
-      {/* Skill picker */}
-      {showSkills && skills.length > 0 && (
+      {/* Skill picker（对话模式只列 lite_enabled 技能，列表为空时整个选择器消失） */}
+      {showSkills && visibleSkills.length > 0 && (
         <div className="max-w-3xl mx-auto mt-2 flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-muted-foreground">{t("chat.skillsLabel")}</span>
-          {skills.map((s) => (
+          {visibleSkills.map((s) => (
             <button
               key={s.id}
               onClick={() => {

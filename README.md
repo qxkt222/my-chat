@@ -116,6 +116,8 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 
 ## 已实现的子系统
 
+- **对话 / 工作双模式**:工作区内分轻量「对话」与全能力「工作」,会话与设置值按模式隔离;
+  对话可用知识库与白名单 MCP 工具,技能需显式标记「对话可用」
 - **多模型适配器**:16 个预设(OpenAI / Claude / Gemini / DeepSeek / Groq / Moonshot /
   智谱 / 通义 / 文心 / MiniMax / 零一 / Mistral / Cohere / OpenRouter / SiliconFlow / Ollama),
   支持自定义模板、SSE 规则、非流式

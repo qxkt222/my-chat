@@ -592,7 +592,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 的区别:不删消息、只维护滚动摘要,注入消息尾部(缓存友好)。
     if (!get().workAutoSummarize || get().workTempMode) return;
     const convStore = useConversationStore.getState();
-    const conv = convStore.conversations.find((c) => c.id === convId);
+    // 必须查全量列表：`conversations` 只是当前子模式的可见视图，用户可能在一个
+    // 会话流式途中切到另一个子模式，此时会话仍在 allConversations 但不在可见列表。
+    // 全量列表为空时回退可见列表（兼容测试/旧调用方注入方式）。
+    const conv =
+      convStore.allConversations.find((c) => c.id === convId) ??
+      convStore.conversations.find((c) => c.id === convId);
     if (!conv || conv.messages.length === 0) return;
     const settingsStore = useSettingsStore.getState();
     const model = settingsStore.models.find((m) => m.name === settingsStore.activeModel);
@@ -604,7 +609,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 后台任务队列(20):摘要走独立任务跑,不阻塞发送链路;侧栏「任务」面板可见进度
     const taskStore = useTaskStore.getState();
     await taskStore.enqueue("自动记忆摘要", async (report) => {
-      const cur = useConversationStore.getState().conversations.find((c) => c.id === convId);
+      // 同上：后台任务期间用户可能已切子模式，按全量列表找
+      const cs = useConversationStore.getState();
+      const cur =
+        cs.allConversations.find((c) => c.id === convId) ??
+        cs.conversations.find((c) => c.id === convId);
       if (!cur || cur.messages.length === 0) return "";
       // 已有摘要 + 全部消息 → 合并式总结;无摘要 → 首轮总结
       const transcript = cur.messages

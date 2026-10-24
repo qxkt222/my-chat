@@ -772,6 +772,95 @@ pub fn mcp_audit(limit: usize) -> Result<Vec<McpAuditEntry>, String> {
     list_audit(limit)
 }
 
+// ── 对话模式 MCP 工具白名单（独立于 allow/ask/deny 权限）──────
+//
+// 「对话」子模式只允许调用用户手动勾选的工具；「工作」子模式不受此表影响。
+// 白名单按 `(server_id, tool)` 存储，与 `mcp_permissions` 完全独立，默认空。
+
+/// 白名单持久化 tree 名。
+const LITE_TOOLS_TREE: &str = "mcp_lite_tools";
+
+/// 键内分隔符：用 US(0x1F) 而非 `:`，避免与 `server_id` / `tool` 中的冒号冲突。
+const LITE_KEY_SEP: char = '\u{1f}';
+
+fn lite_tool_key(server_id: &str, tool: &str) -> Vec<u8> {
+    format!("{server_id}{LITE_KEY_SEP}{tool}").into_bytes()
+}
+
+/// 空参数（含纯空白）一律拒绝；`server_id` 不得包含键分隔符，否则无法反解。
+fn validate_lite_tool(server_id: &str, tool: &str) -> Result<(), String> {
+    if server_id.trim().is_empty() {
+        return Err("MCP 对话白名单: server_id 不能为空".to_string());
+    }
+    if tool.trim().is_empty() {
+        return Err("MCP 对话白名单: tool 不能为空".to_string());
+    }
+    if server_id.contains(LITE_KEY_SEP) {
+        return Err("MCP 对话白名单: server_id 不能包含分隔符 \\u{1f}".to_string());
+    }
+    Ok(())
+}
+
+/// 写入（allowed=true）或删除（allowed=false）一条白名单项。
+/// 注入 tree 便于单测使用临时库，不污染真实用户库。
+fn set_lite_tool(
+    tree: &sled::Tree,
+    server_id: &str,
+    tool: &str,
+    allowed: bool,
+) -> Result<(), String> {
+    validate_lite_tool(server_id, tool)?;
+    let key = lite_tool_key(server_id, tool);
+    if allowed {
+        tree.insert(key, b"1".as_slice())
+            .map_err(|e| format!("保存对话白名单失败: {e}"))?;
+    } else {
+        tree.remove(key)
+            .map_err(|e| format!("删除对话白名单失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 列出全部白名单项，按 `(server_id, tool)` 字典序排序。
+fn list_lite_tools_from(tree: &sled::Tree) -> Vec<(String, String)> {
+    let mut list = Vec::new();
+    for (k, _) in tree.iter().filter_map(std::result::Result::ok) {
+        let raw = String::from_utf8_lossy(&k);
+        let Some((server_id, tool)) = raw.split_once(LITE_KEY_SEP) else {
+            continue; // 非法键（非本模块写入）跳过，避免整表读取失败
+        };
+        list.push((server_id.to_string(), tool.to_string()));
+    }
+    list.sort();
+    list
+}
+
+/// 纯函数判定：「对话」模式是否允许调用该工具。
+/// 精确 `(server_id, tool)` 命中，或该服务器配置了 `*` 通配。
+///
+/// 供对话模式的调用链复用；当前 bin 内暂未接入（工作模式不受影响），
+/// 因此单独允许 `dead_code`，避免 `-D warnings` 把门禁打挂。
+#[allow(dead_code)]
+#[must_use]
+pub fn is_lite_allowed(list: &[(String, String)], server_id: &str, tool: &str) -> bool {
+    list.iter()
+        .any(|(s, t)| s == server_id && (t == tool || t == "*"))
+}
+
+/// 勾选 / 取消「对话」模式下可用的 MCP 工具（`tool="*"` 表示整台服务器）。
+#[tauri::command]
+pub fn mcp_set_lite_tool(server_id: String, tool: String, allowed: bool) -> Result<(), String> {
+    let tree = crate::db::tree(LITE_TOOLS_TREE)?;
+    set_lite_tool(&tree, &server_id, &tool, allowed)
+}
+
+/// 列出「对话」模式 MCP 工具白名单（按 server/tool 排序）。
+#[tauri::command]
+pub fn mcp_list_lite_tools() -> Result<Vec<(String, String)>, String> {
+    let tree = crate::db::tree(LITE_TOOLS_TREE)?;
+    Ok(list_lite_tools_from(&tree))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,5 +1089,153 @@ mod tests {
             older < newer,
             "时间更早的键必须排在前面（滚动清理依赖此序）"
         );
+    }
+
+    // ── 对话模式 MCP 工具白名单 ────────────────────────
+
+    /// 临时 sled 库：tree 与 db 都要在删目录前显式释放，
+    /// 否则 Windows 上句柄未关，`remove_dir_all` 会静默失败留下垃圾。
+    struct TempLiteTree {
+        dir: std::path::PathBuf,
+        db: Option<sled::Db>,
+        tree: Option<sled::Tree>,
+    }
+
+    impl TempLiteTree {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("mychat-mcp-lite-{tag}-{}", uuid::Uuid::new_v4()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let db = sled::open(&dir).expect("打开临时 sled");
+            let tree = db.open_tree(LITE_TOOLS_TREE).expect("打开白名单 tree");
+            Self {
+                dir,
+                db: Some(db),
+                tree: Some(tree),
+            }
+        }
+
+        fn tree(&self) -> &sled::Tree {
+            self.tree.as_ref().expect("tree 存活")
+        }
+    }
+
+    impl Drop for TempLiteTree {
+        fn drop(&mut self) {
+            self.tree.take();
+            self.db.take();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn pair(server: &str, tool: &str) -> (String, String) {
+        (server.to_string(), tool.to_string())
+    }
+
+    #[test]
+    fn lite_tool_set_list_remove_roundtrip() {
+        let t = TempLiteTree::new("roundtrip");
+        assert!(
+            list_lite_tools_from(t.tree()).is_empty(),
+            "白名单默认必须为空"
+        );
+
+        set_lite_tool(t.tree(), "s1", "t1", true).expect("设置成功");
+        assert_eq!(
+            t.tree()
+                .get(lite_tool_key("s1", "t1"))
+                .expect("读 key")
+                .as_deref(),
+            Some(&b"1"[..]),
+            "值必须是 \"1\""
+        );
+        assert_eq!(
+            list_lite_tools_from(t.tree()),
+            vec![pair("s1", "t1")],
+            "列出设置项"
+        );
+
+        // 重复设置幂等：同一 key 不会产生重复项。
+        set_lite_tool(t.tree(), "s1", "t1", true).expect("重复设置");
+        assert_eq!(list_lite_tools_from(t.tree()), vec![pair("s1", "t1")]);
+
+        set_lite_tool(t.tree(), "s1", "t1", false).expect("取消成功");
+        assert!(
+            list_lite_tools_from(t.tree()).is_empty(),
+            "取消后列表应为空"
+        );
+        assert!(
+            t.tree()
+                .get(lite_tool_key("s1", "t1"))
+                .expect("读 key")
+                .is_none(),
+            "取消后 key 必须被删除"
+        );
+    }
+
+    #[test]
+    fn lite_tool_same_server_tools_do_not_cross_contaminate() {
+        let t = TempLiteTree::new("isolation");
+        set_lite_tool(t.tree(), "s1", "t1", true).expect("s1/t1");
+        set_lite_tool(t.tree(), "s1", "t2", true).expect("s1/t2");
+        set_lite_tool(t.tree(), "s2", "t1", true).expect("s2/t1");
+
+        assert_eq!(
+            list_lite_tools_from(t.tree()),
+            vec![pair("s1", "t1"), pair("s1", "t2"), pair("s2", "t1")],
+            "必须按 server/tool 排序"
+        );
+
+        set_lite_tool(t.tree(), "s1", "t1", false).expect("取消 s1/t1");
+        assert_eq!(
+            list_lite_tools_from(t.tree()),
+            vec![pair("s1", "t2"), pair("s2", "t1")],
+            "取消一个工具不得影响同服务器其他工具"
+        );
+    }
+
+    #[test]
+    fn lite_tool_wildcard_covers_whole_server() {
+        let t = TempLiteTree::new("wildcard");
+        set_lite_tool(t.tree(), "s1", "*", true).expect("设置整服务器");
+        let list = list_lite_tools_from(t.tree());
+        assert_eq!(list, vec![pair("s1", "*")]);
+        assert!(is_lite_allowed(&list, "s1", "anything"));
+        assert!(!is_lite_allowed(&list, "s2", "anything"));
+    }
+
+    #[test]
+    fn lite_tool_rejects_empty_parameters() {
+        let t = TempLiteTree::new("empty");
+        let err = set_lite_tool(t.tree(), "", "t1", true).expect_err("空 server_id 必须拒绝");
+        assert!(err.contains("server_id"), "错误应点名 server_id：{err}");
+        let err = set_lite_tool(t.tree(), "s1", "", true).expect_err("空 tool 必须拒绝");
+        assert!(err.contains("tool"), "错误应点名 tool：{err}");
+        let err = set_lite_tool(t.tree(), "   ", "t1", true).expect_err("空白 server_id 必须拒绝");
+        assert!(err.contains("server_id"), "{err}");
+        let err = set_lite_tool(t.tree(), "s1", " \t ", true).expect_err("空白 tool 必须拒绝");
+        assert!(err.contains("tool"), "{err}");
+        assert!(
+            list_lite_tools_from(t.tree()).is_empty(),
+            "被拒绝的参数不得写入任何项"
+        );
+    }
+
+    #[test]
+    fn is_lite_allowed_matrix() {
+        let list = vec![pair("s1", "read"), pair("s2", "*")];
+        // 精确匹配
+        assert!(is_lite_allowed(&list, "s1", "read"));
+        // 服务器级通配
+        assert!(is_lite_allowed(&list, "s2", "write"));
+        assert!(is_lite_allowed(&list, "s2", "read"));
+        // 同服务器、不同工具
+        assert!(!is_lite_allowed(&list, "s1", "write"));
+        // 同工具、不同服务器
+        assert!(!is_lite_allowed(&list, "s3", "read"));
+        // 空列表
+        assert!(!is_lite_allowed(&[], "s1", "read"));
+        // 通配只属于 s2，不泄漏到 s1
+        assert!(!is_lite_allowed(&list, "s1", "*"));
     }
 }

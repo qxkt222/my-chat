@@ -84,6 +84,7 @@ export function SkillManager() {
         tags: edit.tags || [],
         tools_json: toolsJson,
         memory_tags: memoryTags,
+        lite_enabled: edit.lite_enabled ?? false,
       });
     setEdit(null);
   };
@@ -100,6 +101,7 @@ export function SkillManager() {
         tags: [],
         tools: [],
         memoryTags: [],
+        lite_enabled: false,
       });
       return;
     }
@@ -139,6 +141,11 @@ export function SkillManager() {
               <span className="text-sm font-medium">{skill.name}</span>
               <p className="text-xs text-muted-foreground truncate">{skill.description}</p>
               <div className="flex gap-2 mt-0.5 text-[10px] text-muted-foreground">
+                {skill.lite_enabled && (
+                  <span className="px-1 rounded bg-primary/15 text-primary">
+                    {t("skills.liteBadge")}
+                  </span>
+                )}
                 {skill.model && <span>{skill.model}</span>}
                 {parseJsonArray(skill.tools_json).length > 0 && (
                   <span className="flex items-center gap-0.5">
@@ -207,6 +214,22 @@ export function SkillManager() {
               onChange={(e) => setEdit({ ...edit, model: e.target.value })}
               className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded"
             />
+
+            {/* 对话模式可用：仅影响「对话」子模式，工作子模式不限制 */}
+            <label className="flex items-start gap-2 px-1 py-0.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!edit.lite_enabled}
+                onChange={(e) => setEdit({ ...edit, lite_enabled: e.target.checked })}
+                className="mt-0.5"
+              />
+              <span className="text-[11px]">
+                <span className="font-medium">{t("skills.liteEnabled")}</span>
+                <span className="block text-[10px] text-muted-foreground">
+                  {t("skills.liteHint")}
+                </span>
+              </span>
+            </label>
 
             {/* Agent 能力：绑定 MCP 工具 */}
             <div className="border border-border rounded-md p-2">

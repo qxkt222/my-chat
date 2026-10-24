@@ -46,6 +46,9 @@ struct JsonSkill {
     tags: Vec<String>,
     created_at: String,
     updated_at: String,
+    /// 旧 JSON 没有这个字段：默认 false（升级后不在对话模式出现）
+    #[serde(default)]
+    lite_enabled: bool,
 }
 #[derive(Debug, Deserialize)]
 struct JsonModel {
@@ -111,6 +114,8 @@ pub fn import_all_from_json() -> Result<ImportResult, String> {
                         persona_id: String::new(),
                         summary: String::new(),
                         summary_msg_count: 0,
+                        // 旧 JSON 没有子模式概念 → 归到工作列表（不消失、不改变行为）
+                        work_mode: conversations::default_work_mode(),
                     };
                     if conversations::create_conv(&c).is_ok() {
                         for (mi, m) in jc.messages.into_iter().enumerate() {
@@ -165,6 +170,7 @@ pub fn import_all_from_json() -> Result<ImportResult, String> {
                         updated_at: js.updated_at,
                         tools_json: String::new(),
                         memory_tags: String::new(),
+                        lite_enabled: js.lite_enabled,
                     })
                     .ok();
                     r.skills += 1;

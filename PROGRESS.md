@@ -1102,3 +1102,22 @@ store 进一步拆分、ReDoS 的 Worker 化、剩余 `JSON.parse(...) as X`（�
 - 新 CSP 在真实 WebView2 各页面（尤其设置弹窗、绘图工作区）是否引入白屏/资源加载失败；
 - 首字节 180s / 空闲 60s 的真实体感 —— 只有单测断言常量与文案，**没有**对着真挂起端点做端到端验证。
 
+### 7.13 对话 / 工作双模式（2026-10-24）
+
+- 顶层仍是 工作/酒馆；工作内新增 `workSubMode: "chat" | "work"`（localStorage 持久化，默认 work），
+  切换条放在聊天区顶部，样式对齐酒馆的「角色扮演/推演」。
+- 会话隔离：`Conversation` 增加 `work_mode`（Rust `serde(default)` → work，旧库/旧导入自动归「工作」）；
+  前端保留全量列表并按模式派生可见列表，两种模式各自记住 activeId / tabIds。
+- 能力矩阵：
+  - 对话：内置 `/search` + 知识库 RAG + `lite_enabled` 技能 + MCP 白名单；
+  - 工作：全能力；项目指令与多模型对比仅工作模式可用。
+- 技能：新增 `Skill.lite_enabled`（默认 false）与设置页「对话模式可用」复选框；
+  顺带修复 `useSkillStore.save()` 丢 `tools_json` / `memory_tags`、每次保存清空 MCP 绑定的旧 bug。
+- MCP：新增独立 tree `mcp_lite_tools` 与 `mcp_set_lite_tool` / `mcp_list_lite_tools`（支持 `*` 通配）；
+  `runMcpChain` / `runMcpStep` 支持逐步 `allowStep`，未授权步骤在 IPC 之前拒绝。
+- 设置值隔离：`active_model` / `default_parameters` / `budget_config` / `global_instruction` /
+  `thinking_config` / `stopping_strings` 按 scope 存取；工作沿用旧 key，对话用 `${key}#chat`，
+  首次继承工作值但不落盘；设置弹窗标题显示「设置 · 对话 / 设置 · 工作」。
+- 测试：前端 **381 passed / 5 skipped**，Rust **128 passed**，coverage lines **43.21%**。
+- 未做：对话/工作各自的设置 tab 集拆分（当前两组 tab 相同，差异体现在值与能力门禁）。
+

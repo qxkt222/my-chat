@@ -149,6 +149,19 @@ export const chatMessages: Record<string, Record<string, string>> = {
     zh: "暂无预设,在 设置 → 模型 里创建",
     en: "No presets yet — create one in Settings → Models",
   },
+  // ── 对话子模式能力裁剪（对话 = 轻量）──
+  "chat.mcpLiteUnsupported": {
+    zh: "对话模式不支持 MCP，请切换到工作模式",
+    en: "MCP is not available in Chat mode. Switch to Work mode.",
+  },
+  "chat.skillLiteUnsupported": {
+    zh: "对话模式不支持技能，请切换到工作模式",
+    en: "Skills are not available in Chat mode. Switch to Work mode.",
+  },
+  "chat.knowledgeLiteUnsupported": {
+    zh: "对话模式不支持知识库检索，请切换到工作模式",
+    en: "Knowledge base retrieval is not available in Chat mode. Switch to Work mode.",
+  },
   "chat.mcpUsage": {
     zh: "用法：/mcp <服务器> <工具> [参数JSON] :: <工具2> [参数JSON] ...（`{prev}` 引用上一步输出）",
     en: "Usage: /mcp <server> <tool> [argsJson] :: <tool2> [argsJson] ... (`{prev}` references the previous output)",
@@ -160,6 +173,10 @@ export const chatMessages: Record<string, Record<string, string>> = {
   "chat.mcpNoTools": {
     zh: "服务器「{s}」没有工具「{t}」，可用：{list}",
     en: 'Server "{s}" has no tool "{t}". Available: {list}',
+  },
+  "chat.mcpLiteDenied": {
+    zh: "「{s}/{t}」未加入对话可用白名单，已跳过",
+    en: '"{s}/{t}" is not in the Chat-mode whitelist; skipped',
   },
   "chat.mcpCallFailed": { zh: "MCP 调用失败：", en: "MCP call failed: " },
   "chat.mcpEmptyResult": { zh: "(空结果)", en: "(empty result)" },

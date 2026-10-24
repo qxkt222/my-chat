@@ -21,6 +21,9 @@ pub struct ConvDto {
     pub summary: String,
     #[serde(default)]
     pub summary_msg_count: i64,
+    /// 工作区子模式: chat / work。旧前端/旧调用不传 → "work"。
+    #[serde(default = "crate::db::conversations::default_work_mode")]
+    pub work_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +61,7 @@ pub fn create_conv(conv: ConvDto) -> Result<(), String> {
         persona_id: conv.persona_id,
         summary: conv.summary,
         summary_msg_count: conv.summary_msg_count,
+        work_mode: conv.work_mode,
     })
 }
 
@@ -76,6 +80,7 @@ pub fn list_convs() -> Result<Vec<ConvDto>, String> {
                 persona_id: c.persona_id,
                 summary: c.summary,
                 summary_msg_count: c.summary_msg_count,
+                work_mode: c.work_mode,
             })
             .collect()
     })
@@ -129,6 +134,7 @@ pub fn load_all() -> Result<LoadAllResult, String> {
                 persona_id: c.persona_id,
                 summary: c.summary,
                 summary_msg_count: c.summary_msg_count,
+                work_mode: c.work_mode,
             })
             .collect(),
         messages,
@@ -364,6 +370,9 @@ pub struct SkillDto {
     pub tools_json: String,
     #[serde(default)]
     pub memory_tags: String,
+    /// 对话模式可用（旧前端不传时按 false 处理）
+    #[serde(default)]
+    pub lite_enabled: bool,
 }
 
 #[tauri::command]
@@ -381,6 +390,7 @@ pub fn create_skill(skill: SkillDto) -> Result<(), String> {
         updated_at: skill.updated_at,
         tools_json: skill.tools_json,
         memory_tags: skill.memory_tags,
+        lite_enabled: skill.lite_enabled,
     })
 }
 
@@ -401,6 +411,7 @@ pub fn list_skills() -> Result<Vec<SkillDto>, String> {
                 updated_at: s.updated_at,
                 tools_json: s.tools_json,
                 memory_tags: s.memory_tags,
+                lite_enabled: s.lite_enabled,
             })
             .collect()
     })
@@ -421,6 +432,7 @@ pub fn update_skill(skill: SkillDto) -> Result<(), String> {
         updated_at: skill.updated_at,
         tools_json: skill.tools_json,
         memory_tags: skill.memory_tags,
+        lite_enabled: skill.lite_enabled,
     })
 }
 

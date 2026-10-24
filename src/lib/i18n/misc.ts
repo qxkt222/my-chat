@@ -1,5 +1,5 @@
 // lib/i18n/misc.ts — 由 i18n.ts 按 key 前缀拆出（自动生成，勿手工搬运 key）
-// 条目数：75
+// 条目数：78
 
 export const miscMessages: Record<string, Record<string, string>> = {
   "tool.initialize": { zh: "初始化工具…", en: "Initializing tools…" },
@@ -46,6 +46,12 @@ export const miscMessages: Record<string, Record<string, string>> = {
     en: "No memories yet (add one in Settings → Memory)",
   },
   "skills.toolsCount": { zh: "{n} 工具", en: "{n} tools" },
+  "skills.liteEnabled": { zh: "对话模式可用", en: "Available in Chat mode" },
+  "skills.liteHint": {
+    zh: "仅「工作 → 对话」子模式会列出该技能；工作子模式始终全部可用",
+    en: "Only listed in Work → Chat submode; Work always lists every skill",
+  },
+  "skills.liteBadge": { zh: "对话", en: "Chat" },
   // ── Model wizard ──
   "wizard.title1": { zh: "选择 AI 服务商", en: "Choose AI Provider" },
   "wizard.title2": { zh: "填写 API Key", en: "Enter API Key" },

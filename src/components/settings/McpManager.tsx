@@ -8,6 +8,8 @@ import {
   mcpDeleteServer,
   mcpListTools,
   mcpCallTool,
+  mcpListLiteTools,
+  mcpSetLiteTool,
   mcpListPermissions,
   mcpSetPermission,
   mcpListGrants,
@@ -42,6 +44,8 @@ export function McpManager() {
   const [grantServer, setGrantServer] = useState("");
   const [grantTool, setGrantTool] = useState("");
   const [grantMinutes, setGrantMinutes] = useState(30);
+  // 「对话可用」白名单：key = `${serverId}\u001f${tool}`，tool="*" 表示整服务器
+  const [liteTools, setLiteTools] = useState<Set<string>>(() => new Set());
 
   const refreshSecurity = async () => {
     try {
@@ -66,6 +70,34 @@ export function McpManager() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // 对话可用白名单：打开设置时读一次，勾选即保存
+  const refreshLiteTools = async () => {
+    try {
+      const list = await mcpListLiteTools();
+      setLiteTools(new Set(list.map(([sid, tool]) => liteToolKey(sid, tool))));
+    } catch {
+      /* ignore */
+    }
+  };
+  useEffect(() => {
+    refreshLiteTools();
+  }, []);
+
+  const toggleLiteTool = async (serverId: string, tool: string, allowed: boolean) => {
+    try {
+      await mcpSetLiteTool(serverId, tool, allowed);
+      setLiteTools((prev) => {
+        const next = new Set(prev);
+        const key = liteToolKey(serverId, tool);
+        if (allowed) next.add(key);
+        else next.delete(key);
+        return next;
+      });
+    } catch (e) {
+      showToast("error", t("mcp.liteSaveFail", { e: String(e) }));
+    }
+  };
 
   const addServer = async () => {
     if (!name.trim() || !command.trim()) {
@@ -268,6 +300,19 @@ export function McpManager() {
               {s.enabled ? t("mcp.enabled") : t("mcp.disabled")}
             </span>
             <span className="text-xs font-medium flex-1">{s.name}</span>
+            <label
+              className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0 cursor-pointer"
+              title={t("mcp.liteServerHint")}
+            >
+              <input
+                type="checkbox"
+                aria-label={t("mcp.liteServer")}
+                checked={liteTools.has(liteToolKey(s.id, "*"))}
+                onChange={(e) => void toggleLiteTool(s.id, "*", e.target.checked)}
+                className="accent-primary"
+              />
+              {t("mcp.liteServer")}
+            </label>
             <span className="text-[10px] text-muted-foreground truncate max-w-[200px]">
               {s.command}
             </span>
@@ -308,6 +353,16 @@ export function McpManager() {
                     {tool.description}
                   </span>
                 )}
+                <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    aria-label={t("mcp.liteTool")}
+                    checked={liteTools.has(liteToolKey(s.id, tool.name))}
+                    onChange={(e) => void toggleLiteTool(s.id, tool.name, e.target.checked)}
+                    className="accent-primary"
+                  />
+                  {t("mcp.liteTool")}
+                </label>
                 <button
                   onClick={() => runTool(s, tool)}
                   disabled={testing[`${s.id}:${tool.name}`] === "running"}
@@ -519,6 +574,11 @@ export function McpManager() {
       </div>
     </div>
   );
+}
+
+/** 白名单本地键：US(0x1F) 分隔，与 Rust 侧 `lite_tool_key` 同构。 */
+function liteToolKey(serverId: string, tool: string): string {
+  return `${serverId}\u001f${tool}`;
 }
 
 function exampleArgs(schema: unknown): Record<string, unknown> {

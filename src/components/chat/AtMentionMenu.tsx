@@ -5,6 +5,7 @@ import { useSkillStore } from "@/stores/useSkillStore";
 import { useKnowledgeStore } from "@/stores/useKnowledgeStore";
 import { useConversationStore } from "@/stores/useConversationStore";
 import { SLASH_COMMANDS } from "@/plugin/commands";
+import type { Skill } from "@/types";
 
 /** @提及对象类型:技能 / 命令 / 知识库 / 最近会话 */
 export type MentionKind = "skill" | "command" | "knowledge" | "conversation";
@@ -42,10 +43,24 @@ export const AtMentionMenu = forwardRef<
     highlight: number;
     onHighlightChange: (i: number) => void;
     onSelect: (sel: MentionSelection) => void;
+    /**
+     * 按子模式隐藏的条目类型。保留给需要整类隐藏的调用方；
+     * 不传 = 全部展示（工作 / 酒馆行为不变）。
+     */
+    hideKinds?: Array<"skill" | "knowledge">;
+    /**
+     * 覆盖技能来源。「对话」子模式只允许 `lite_enabled === true` 的技能，
+     * 由调用方传入过滤后的列表——菜单层就不出现不可用条目。
+     */
+    skillsOverride?: Skill[];
   }
->(function AtMentionMenu({ trigger, highlight, onHighlightChange, onSelect }, ref) {
+>(function AtMentionMenu(
+  { trigger, highlight, onHighlightChange, onSelect, hideKinds, skillsOverride },
+  ref
+) {
   const t = useT();
-  const skills = useSkillStore((s) => s.skills);
+  const storedSkills = useSkillStore((s) => s.skills);
+  const skills = skillsOverride ?? storedSkills;
   const bases = useKnowledgeStore((s) => s.bases);
   const conversations = useConversationStore((s) => s.conversations);
   const listRef = useRef<HTMLDivElement>(null);
@@ -53,25 +68,30 @@ export const AtMentionMenu = forwardRef<
   const q = trigger.trim().toLowerCase();
 
   const items = useMemo<MentionItem[]>(() => {
+    const hidden = new Set<string>(hideKinds ?? []);
     const list: MentionItem[] = [
-      ...skills.map((s) => ({
-        kind: "skill" as const,
-        id: s.id,
-        name: s.name,
-        description: s.description || s.systemPrompt.slice(0, 60),
-      })),
+      ...(hidden.has("skill")
+        ? []
+        : skills.map((s) => ({
+            kind: "skill" as const,
+            id: s.id,
+            name: s.name,
+            description: s.description || s.systemPrompt.slice(0, 60),
+          }))),
       ...SLASH_COMMANDS.map((c) => ({
         kind: "command" as const,
         id: c.cmd,
         name: `/${c.cmd}`,
         description: c.description || "",
       })),
-      ...bases.map((b) => ({
-        kind: "knowledge" as const,
-        id: b.id,
-        name: b.name,
-        description: t("mention.knowledgeDesc"),
-      })),
+      ...(hidden.has("knowledge")
+        ? []
+        : bases.map((b) => ({
+            kind: "knowledge" as const,
+            id: b.id,
+            name: b.name,
+            description: t("mention.knowledgeDesc"),
+          }))),
       // 最近会话(最多 8 个,按 updated_at)
       ...[...conversations]
         .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
@@ -88,7 +108,7 @@ export const AtMentionMenu = forwardRef<
           (i) => i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q)
         )
       : list;
-  }, [skills, bases, conversations, q, t]);
+  }, [skills, bases, conversations, q, t, hideKinds]);
 
   const visible = items.slice(0, 12);
   // 高亮越界兜底(列表缩短时)

@@ -64,6 +64,9 @@ export const shellMessages: Record<string, Record<string, string>> = {
   "shortcut.prevProvider": { zh: "上一个服务商", en: "Previous provider" },
   "shortcut.nextSubModel": { zh: "下一个子模型", en: "Next sub-model" },
   "shortcut.prevSubModel": { zh: "上一个子模型", en: "Previous sub-model" },
+  // ── 工作模式子模式(对话 / 工作)──
+  "workSub.chat": { zh: "对话", en: "Chat" },
+  "workSub.work": { zh: "工作", en: "Work" },
   // ── App ──
   "app.loading": { zh: "加载中...", en: "Loading..." },
   "app.partialLoadFailed": {

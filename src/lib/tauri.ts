@@ -189,7 +189,9 @@ export type DbConvCreateInput = Pick<
   DbConvDto,
   "id" | "title" | "model_name" | "system_prompt" | "created_at" | "updated_at"
 > &
-  Partial<Pick<DbConvDto, "character_id" | "persona_id" | "summary" | "summary_msg_count">>;
+  Partial<
+    Pick<DbConvDto, "character_id" | "persona_id" | "summary" | "summary_msg_count" | "work_mode">
+  >;
 
 export type DbMsgCreateInput = Pick<
   DbMsgDto,
@@ -213,7 +215,7 @@ export type DbSkillCreateInput = Pick<
   | "created_at"
   | "updated_at"
 > &
-  Partial<Pick<DbSkillDto, "tools_json" | "memory_tags">>;
+  Partial<Pick<DbSkillDto, "tools_json" | "memory_tags" | "lite_enabled">>;
 
 // ── DB: Conversations ────────────────────────────────────
 export function dbCreateConv(conv: DbConvCreateInput): Promise<void> {
@@ -363,6 +365,15 @@ export function mcpDeleteServer(id: string): Promise<void> {
 }
 export function mcpListTools(serverId: string): Promise<McpToolDto[]> {
   return invoke("mcp_list_tools", { serverId });
+}
+// ── 「对话」模式 MCP 工具白名单（与 allow/ask/deny 权限独立）──────────
+/** 列出对话模式可用的工具白名单：`[server_id, tool]`，`tool="*"` 表示整服务器。 */
+export function mcpListLiteTools(): Promise<Array<[string, string]>> {
+  return invoke("mcp_list_lite_tools");
+}
+/** 勾选 / 取消对话模式可用的工具（`tool="*"` 表示整服务器）。 */
+export function mcpSetLiteTool(serverId: string, tool: string, allowed: boolean): Promise<void> {
+  return invoke("mcp_set_lite_tool", { serverId, tool, allowed });
 }
 export function mcpCallTool(
   serverId: string,
