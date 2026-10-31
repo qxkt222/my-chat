@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { TavernConversation, Message, ModelConfig } from "@/types";
+import type { TavernConversation, Message, ModelConfig, CharacterCard } from "@/types";
 import { getAppDir, readFile, writeFile, listDir, deleteItem } from "@/lib/tauri";
 import { streamChat, cancelChat, logDiag } from "@/lib/tauri";
 import { useCharacterStore } from "./useCharacterStore";
@@ -45,6 +45,111 @@ const tavernStreamBatcher = createStreamBatcher<string>((batch) => {
     return res.changed ? { conversations: res.conversations } : s;
   });
 });
+
+/**
+ * 当前在途生成的收尾入口(T-026)。
+ *
+ * cancelGeneration 是全局同步动作,拿不到各生成链路里闭包内的 finish();
+ * 旧实现取消时只清 isStreaming,cancelChat 又立刻删 handler → Rust 取消后
+ * 补发的 done 到不了 onDone,finish 永不执行,磁盘留下 content:""。
+ *
+ * 每次生成开始时把同一份 finish 登记在这里:取消时直接调用它,先 flush 合帧、
+ * 把已生成正文/思考写回消息再 saveConv。finish 自己的 finished 守卫保证取消
+ * 宽限窗口内迟到的 done 不会二次落盘。
+ */
+interface ActiveGeneration {
+  convId: string;
+  msgId: string;
+  finish: (errText?: string) => Promise<void>;
+}
+let activeGeneration: ActiveGeneration | null = null;
+
+/**
+ * 同一会话「读最新 → 合并字段 → 落盘」的串行化队列。
+ *
+ * 后台任务(自动摘要 / 自动翻译)在 await 期间,会话可能已被发送消息、另一个
+ * 后台任务更新或被删除。旧实现用 await 前的快照整对象回写,会把这些更新一起
+ * 抹掉(T-002)。现在任务完成后都按 id 重取最新会话、只合并自己负责的字段;
+ * 同一会话的写回再串成队列——否则两个任务可能各自读到同一份旧 state 再先后
+ * 覆盖,摘要与翻译同开时仍会互相吞掉。
+ */
+const convPatchQueues = new Map<string, Promise<void>>();
+
+function enqueueConvPatch(convId: string, run: () => Promise<void>): Promise<void> {
+  const prev = convPatchQueues.get(convId) ?? Promise.resolve();
+  const next = prev.then(run).catch((e: unknown) => {
+    logDiag(`Tavern background patch error (${convId}): ${String(e)}`);
+  });
+  convPatchQueues.set(convId, next);
+  void next.then(() => {
+    if (convPatchQueues.get(convId) === next) convPatchQueues.delete(convId);
+  });
+  return next;
+}
+
+/**
+ * 群聊重试/继续的上下文组装(T-024)。
+ *
+ * 群聊里点重试/继续此前固定取 conv.character_id 的单卡 + buildRpSystemParts,
+ * 结果 prompt 里没有其他在场角色,上下文与发言角色都是错的。这里与
+ * sendGroupMessage 的群聊分支对齐:所有在场角色由 buildGroupSystemParts 汇总,
+ * 发言者手动模式取 activeCharId、自动模式取说话队列队首。单聊不走这里,
+ * 仍保留各自的单角色链路。
+ */
+function buildGroupReplayParts(args: {
+  conv: TavernConversation;
+  cards: CharacterCard[];
+  history: Message[];
+  currentInput: string;
+}): {
+  stableSystem: string;
+  lorebook: string;
+  summary: string;
+  replyCharName: string;
+  timedLore: TimedLoreState;
+} {
+  const charStore = useCharacterStore.getState();
+  const persona =
+    charStore.personas.find((p) => p.id === args.conv.persona_id) ||
+    charStore.getActivePersona() ||
+    null;
+  // 与 sendGroupMessage 的群聊分支一致:角色级世界书合并;各卡内嵌书由
+  // buildGroupSystemParts 自己收集,这里不重复塞单卡内嵌书
+  const books = collectLorebooks({
+    globalLorebook: charStore.globalLorebook,
+    card: {
+      character_book: undefined,
+      lorebookIds: args.cards.flatMap((c) => c.lorebookIds || []),
+    },
+    enabledIds: charStore.enabledLorebookIds,
+    personaIds: persona?.lorebookIds || [],
+    convIds: args.conv.lorebookIds || [],
+    byId: charStore.lorebooks,
+  });
+  const auto = args.conv.autoRespond === true;
+  const queueIdx = args.conv.queueIndex ?? 0;
+  const queueChar = args.cards[queueIdx % args.cards.length];
+  const activeCard = args.cards.find((c) => c.id === args.conv.activeCharId) || args.cards[0];
+  const speaker = auto ? queueChar : activeCard;
+  const parts = buildGroupSystemParts({
+    cards: args.cards,
+    persona,
+    personaName: persona?.name,
+    lorebooks: books,
+    recentMessages: args.history,
+    currentInput: args.currentInput,
+    summary: args.conv.summary,
+    timed: args.conv.timedLore,
+    queueCharName: speaker?.name,
+  });
+  return {
+    stableSystem: parts.stableSystem,
+    lorebook: parts.lorebook,
+    summary: parts.summary,
+    replyCharName: speaker?.name || "",
+    timedLore: mergeTimedLore(args.conv.timedLore, parts.timedResult),
+  };
+}
 
 interface TavernState {
   conversations: TavernConversation[];
@@ -114,6 +219,8 @@ interface TavernState {
   swipeGenerate: (msgId: string) => Promise<void>;
   /** 继续生成(酒馆 Continue):以上一条回复结尾为前缀,续写生成新内容 */
   continueMessage: (msgId: string) => Promise<void>;
+  /** 编辑消息正文:variants 是版本展示真源,同步写回 variants[variantIndex] */
+  editMessage: (msgId: string, content: string) => Promise<void>;
   /** 冒充回复(酒馆 Impersonate):以当前角色身份手动写入一条 assistant 消息,不走 AI */
   impersonate: (content: string) => Promise<void>;
   /** 会话消息变量(酒馆 {{var::x}} 宏):设置单个变量并落盘 */
@@ -426,14 +533,23 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const summary = result.summary;
     // 只有完整结束才落盘：中断时的半截摘要会覆盖掉上一份好摘要
     if (result.complete && summary) {
-      // 记账:记住总结时的消息数(阈值判定用),与摘要一起落盘
-      const updated = {
-        ...conv,
-        summary,
-        summary_msg_count: conv.messages.length,
-        updated_at: nowISO(),
-      };
-      await get().saveConv(updated);
+      // 记账:本次摘要覆盖到的消息数 = 任务开始时的条数。await 期间新到的消息
+      // 还没进这份摘要,必须留给下一轮(用完成时的长度会把它们标成「已摘要」)。
+      const coveredCount = conv.messages.length;
+      await enqueueConvPatch(convId, async () => {
+        // await 后按 id 重取最新会话:期间可能追加消息、被另一个后台任务更新
+        // 或整个被删除 —— 旧快照整对象回写会把这些更新一并抹掉。
+        const latest = get().conversations.find((c) => c.id === convId);
+        // 会话已删除:放弃写回,否则 saveConv 会把刚删掉的文件重新创建出来
+        if (!latest) return;
+        // 只合并本次任务负责的字段(messages/标题等仍用最新状态)
+        await get().saveConv({
+          ...latest,
+          summary,
+          summary_msg_count: coveredCount,
+          updated_at: nowISO(),
+        });
+      });
     }
   },
 
@@ -458,14 +574,20 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       const target = get().translateTargetLang;
       const translated = await translateText(msg.content, target);
       if (!translated) return;
-      const updated = {
-        ...conv,
-        updated_at: nowISO(),
-        messages: conv.messages.map((m) =>
-          m.id === msgId ? { ...m, translation: translated } : m
-        ),
-      };
-      await get().saveConv(updated);
+      await enqueueConvPatch(convId, async () => {
+        // await 后按 id 重取最新会话:期间的新消息、摘要结果不能被旧快照抹掉
+        const latest = get().conversations.find((c) => c.id === convId);
+        if (!latest) return; // 会话已删除:放弃写回,不重建文件
+        if (!latest.messages.some((m) => m.id === msgId)) return; // 消息已不存在
+        // 只合并这条消息的 translation;其余消息(含 await 期间新增的)保持最新
+        await get().saveConv({
+          ...latest,
+          updated_at: nowISO(),
+          messages: latest.messages.map((m) =>
+            m.id === msgId ? { ...m, translation: translated } : m
+          ),
+        });
+      });
     } catch (e) {
       logDiag(`Tavern translate error: ${String(e)}`);
     } finally {
@@ -585,6 +707,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      if (activeGeneration?.msgId === asmMsg.id) activeGeneration = null;
       // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
       // 未刷新的增量在收尾之后才 apply(会重复拼接)
       tavernStreamBatcher.flush();
@@ -597,6 +720,9 @@ export const useTavernStore = create<TavernState>((set, get) => ({
           const content = pluginAPI.executeAfterResponse(m.content || "");
           return {
             ...m,
+            // variants 与 content 同步(T-025):插件后处理改写的正文也要落进 content,
+            // 否则界面(variants)与发送上下文(content)再次分叉
+            content,
             error: errText || m.error,
             variants: m.variants || [content],
             variantIndex: m.variantIndex ?? 0,
@@ -607,6 +733,8 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       }
       set({ isStreaming: false, activeRequestId: null });
     };
+    // T-026:取消路径与正常完成共用同一份收尾(落盘已生成正文/思考)
+    activeGeneration = { convId: conv.id, msgId: asmMsg.id, finish };
 
     try {
       // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)
@@ -709,7 +837,11 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       await get().swipeGenerate(msgId);
       return;
     }
-    const messages = conv.messages.map((x) => (x.id === msgId ? { ...x, variantIndex: next } : x));
+    // variants 是版本展示真源,content 必须同步为当前版本(T-025):
+    // 否则界面显示 B,发送/摘要/翻译读到的还是切换前的 A
+    const messages = conv.messages.map((x) =>
+      x.id === msgId ? { ...x, variantIndex: next, content: variants[next] ?? x.content } : x
+    );
     await get().saveConv({ ...conv, messages, updated_at: nowISO() });
   },
 
@@ -717,8 +849,15 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const conv = get().getActive();
     if (!conv || get().isStreaming) return;
     const charStore = useCharacterStore.getState();
-    const card = charStore.characters.find((c) => c.id === conv.character_id);
-    if (!card) return;
+    // 群聊分支(T-024):与 sendGroupMessage 同一套群聊 prompt,不再固定取单卡
+    const isGroup = (conv.groupCharIds?.length || 0) >= 2;
+    const groupCards = isGroup
+      ? (conv.groupCharIds || [])
+          .map((id) => charStore.characters.find((c) => c.id === id))
+          .filter((c): c is CharacterCard => !!c)
+      : [];
+    if (isGroup && groupCards.length < 2) return;
+    const card = isGroup ? undefined : charStore.characters.find((c) => c.id === conv.character_id);
     const settingsStore = useSettingsStore.getState();
     const model = get().resolveModel(conv);
     if (!model) {
@@ -736,35 +875,64 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     if (!lastUser) return;
 
     // 三段式(与 sendMessage 同链):stableSystem 前缀 + 历史 + 世界书/摘要尾部 + 原 user 输入
-    const persona =
-      charStore.personas.find((p) => p.id === conv.persona_id) ||
-      charStore.getActivePersona() ||
-      null;
-    const books = collectLorebooks({
-      globalLorebook: charStore.globalLorebook,
-      card,
-      enabledIds: charStore.enabledLorebookIds,
-      personaIds: persona?.lorebookIds || [],
-      convIds: conv.lorebookIds || [],
-      byId: charStore.lorebooks,
-    });
-    const parts = buildRpSystemParts({
-      card,
-      persona,
-      preset: charStore.presets,
-      lorebooks: books,
-      recentMessages: before,
-      currentInput: lastUser.content,
-      summary: conv.summary,
-      timed: conv.timedLore,
-    });
-    const timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
+    // 群聊走 buildGroupReplayParts(全部在场角色 + activeChar/队首);
+    // 单聊保持原来的单角色链路。
+    const auto = isGroup && conv.autoRespond === true;
+    let stableSystem: string;
+    let lorebook: string;
+    let summaryPart: string;
+    let timedLore: TimedLoreState;
+    let depthPrompt: { depth: number; prompt: string } | undefined;
+    let replyCharName = "";
+    if (isGroup) {
+      const groupParts = buildGroupReplayParts({
+        conv,
+        cards: groupCards,
+        history: before,
+        currentInput: lastUser.content,
+      });
+      stableSystem = groupParts.stableSystem;
+      lorebook = groupParts.lorebook;
+      summaryPart = groupParts.summary;
+      timedLore = groupParts.timedLore;
+      replyCharName = groupParts.replyCharName;
+    } else {
+      if (!card) return;
+      const persona =
+        charStore.personas.find((p) => p.id === conv.persona_id) ||
+        charStore.getActivePersona() ||
+        null;
+      const books = collectLorebooks({
+        globalLorebook: charStore.globalLorebook,
+        card,
+        enabledIds: charStore.enabledLorebookIds,
+        personaIds: persona?.lorebookIds || [],
+        convIds: conv.lorebookIds || [],
+        byId: charStore.lorebooks,
+      });
+      const parts = buildRpSystemParts({
+        card,
+        persona,
+        preset: charStore.presets,
+        lorebooks: books,
+        recentMessages: before,
+        currentInput: lastUser.content,
+        summary: conv.summary,
+        timed: conv.timedLore,
+      });
+      stableSystem = parts.stableSystem;
+      lorebook = parts.lorebook;
+      summaryPart = parts.summary;
+      timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
+      depthPrompt = parts.depthPrompt;
+    }
     const apiMessages = assembleApiMessages({
-      stableSystem: parts.stableSystem,
+      stableSystem,
       pinned: conv.pinned, // 钉住区(40):常驻上下文,重放同样生效
       history: before,
-      lorebook: parts.lorebook,
-      summary: parts.summary,
+      // 自动/手动群聊沿用 sendGroupMessage 的设定块标题
+      lorebook: isGroup && lorebook ? `【世界观设定】\n${lorebook}` : lorebook,
+      summary: summaryPart,
       // 数据银行/聊天附件(酒馆 Data Bank):重放同样注入
       attachmentBlock: buildAttachmentBlock(conv),
       userContent: lastUser.content,
@@ -781,11 +949,11 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       apiMessages.push(...withNote);
     }
     // V3 扩展:深度提示词(重放上下文同样生效;注入点固定文本恒定 → 缓存友好)
-    if (parts.depthPrompt && before.length >= parts.depthPrompt.depth) {
-      const at = Math.min(1 + parts.depthPrompt.depth, apiMessages.length);
+    if (depthPrompt && before.length >= depthPrompt.depth) {
+      const at = Math.min(1 + depthPrompt.depth, apiMessages.length);
       apiMessages.splice(at, 0, {
         role: "system",
-        content: `【深度提示词】\n${parts.depthPrompt.prompt}`,
+        content: `【深度提示词】\n${depthPrompt.prompt}`,
       });
     }
 
@@ -794,24 +962,31 @@ export const useTavernStore = create<TavernState>((set, get) => ({
 
     // 占位:新版本流式写入该消息,完成后 push 进 variants 指向新版
     const requestId = uuid();
-    const updated = {
-      ...conv,
-      timedLore,
-      messages: conv.messages.map((m) => (m.id === msgId ? { ...m, content: "" } : m)),
-      updated_at: nowISO(),
-    };
+    // T-026：绝不「先清空 content 再落盘」。生成中只在内存里把 content 清空
+    // 用于展示流式增量；旧正文仍保存在 variants / asmMsg 快照中，正常完成、
+    // 取消或出错时再由 finish 一次性落盘。旧实现这一笔 saveConv({content:""})
+    // 在取消时会让磁盘永久留下空正文，而 variants 还是旧文。
     set({
-      conversations: get().conversations.map((c) => (c.id === conv.id ? updated : c)),
+      conversations: get().conversations.map((c) =>
+        c.id === conv.id
+          ? {
+              ...conv,
+              timedLore,
+              messages: conv.messages.map((m) => (m.id === msgId ? { ...m, content: "" } : m)),
+              updated_at: nowISO(),
+            }
+          : c
+      ),
       isStreaming: true,
       activeRequestId: requestId,
     });
-    await get().saveConv(updated);
 
     let acc = "";
     let finished = false;
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      if (activeGeneration?.msgId === msgId) activeGeneration = null;
       // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
       // 未刷新的增量在收尾之后才 apply(会重复拼接)
       tavernStreamBatcher.flush();
@@ -821,19 +996,48 @@ export const useTavernStore = create<TavernState>((set, get) => ({
           if (m.id !== msgId) return m;
           // 响应后处理钩子(插件 afterResponse):新版本落盘前应用
           const processed = pluginAPI.executeAfterResponse(acc);
-          const variants = [...(m.variants || [asmMsg.content || ""]), processed];
+          // 群聊:自动模式按首行【角色名】归属,手动模式固定为当前 activeChar;
+          // 单聊保持原来的 model 不变(T-024)
+          let content = processed;
+          let modelName = m.model;
+          if (isGroup) {
+            const parsed = auto
+              ? parseGroupOwner(
+                  processed,
+                  groupCards.map((c) => c.name)
+                )
+              : null;
+            content = parsed?.content ?? processed;
+            modelName = parsed?.owner || replyCharName || m.model;
+          }
+          // 取消得太早/空生成:恢复旧版本,绝不把 content 落成空串 ——
+          // MessageBubble 的操作栏依赖非空内容,留空后无法复制/编辑/滑卡。
+          const previous = m.variants?.[m.variantIndex ?? 0] ?? asmMsg.content ?? "";
+          if (!content) {
+            return {
+              ...m,
+              content: previous,
+              error: errText || m.error,
+              ...(isGroup ? { model: modelName } : {}),
+            };
+          }
+          // variants 与 content 同步(T-025)
+          const variants = [...(m.variants || [asmMsg.content || ""]), content];
           return {
             ...m,
-            content: processed,
+            content,
             variants,
             variantIndex: variants.length - 1,
             error: errText || m.error,
+            ...(isGroup ? { model: modelName } : {}),
           };
         });
         await get().saveConv({ ...cur, messages, updated_at: nowISO() });
       }
       set({ isStreaming: false, activeRequestId: null });
     };
+    // T-026:取消路径与正常完成共用同一份收尾(落盘半截正文)
+    activeGeneration = { convId: conv.id, msgId, finish };
 
     try {
       // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)
@@ -954,11 +1158,22 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const { isStreaming, activeRequestId } = get();
     if (!isStreaming) return;
     if (activeRequestId) {
-      cancelChat(activeRequestId); // Rust 侧中止流
+      // 先发取消请求。cancelChat 会保留 handler 一个短窗口,让 Rust 取消路径
+      // 补发的 done 仍能到达 onDone(T-026);这里不依赖那次 done。
+      cancelChat(activeRequestId);
     }
-    // 合帧补偿:取消前先落出已生成但未刷新的 token
+    // 合帧补偿:先把已生成但未刷新的 token 应用到 store,收尾才能读到
     tavernStreamBatcher.flush();
-    set({ isStreaming: false, activeRequestId: null });
+    const gen = activeGeneration;
+    if (gen) {
+      // 与正常完成共用同一份 finish:flush → 已生成正文/思考写回消息 → saveConv。
+      // 磁盘上不再是空 content;内容为空时 finish 会恢复旧版本(variants)。
+      void gen.finish().catch((e: unknown) => {
+        logDiag(`Tavern cancel persist error (${gen.convId}): ${String(e)}`);
+      });
+    } else {
+      set({ isStreaming: false, activeRequestId: null });
+    }
   },
 
   continueMessage: async (msgId) => {
@@ -967,8 +1182,15 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const conv = get().getActive();
     if (!conv || get().isStreaming) return;
     const charStore = useCharacterStore.getState();
-    const card = charStore.characters.find((c) => c.id === conv.character_id);
-    if (!card) return;
+    // 群聊分支(T-024):与 sendGroupMessage 同一套群聊 prompt,不再固定取单卡
+    const isGroup = (conv.groupCharIds?.length || 0) >= 2;
+    const groupCards = isGroup
+      ? (conv.groupCharIds || [])
+          .map((id) => charStore.characters.find((c) => c.id === id))
+          .filter((c): c is CharacterCard => !!c)
+      : [];
+    if (isGroup && groupCards.length < 2) return;
+    const card = isGroup ? undefined : charStore.characters.find((c) => c.id === conv.character_id);
     const settingsStore = useSettingsStore.getState();
     const model = get().resolveModel(conv);
     if (!model) {
@@ -979,38 +1201,62 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     if (idx < 0) return;
     const asmMsg = conv.messages[idx];
     if (!asmMsg || asmMsg.role !== "assistant") return;
-    // 继续 = 把该条当前内容作为前缀,续写其后
-    const prefix = asmMsg.content || "";
+    // 继续 = 把该条当前版本作为前缀,续写其后(variants 为真源,旧数据 content 兜底)
+    const prefix = asmMsg.variants?.[asmMsg.variantIndex ?? 0] ?? asmMsg.content ?? "";
 
-    const persona =
-      charStore.personas.find((p) => p.id === conv.persona_id) ||
-      charStore.getActivePersona() ||
-      null;
-    const books = collectLorebooks({
-      globalLorebook: charStore.globalLorebook,
-      card,
-      enabledIds: charStore.enabledLorebookIds,
-      personaIds: persona?.lorebookIds || [],
-      convIds: conv.lorebookIds || [],
-      byId: charStore.lorebooks,
-    });
-    const parts = buildRpSystemParts({
-      card,
-      persona,
-      preset: charStore.presets,
-      lorebooks: books,
-      recentMessages: conv.messages.slice(0, idx),
-      currentInput: "",
-      summary: conv.summary,
-      timed: conv.timedLore,
-    });
-    const timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
+    const auto = isGroup && conv.autoRespond === true;
+    let stableSystem: string;
+    let lorebook: string;
+    let summaryPart: string;
+    let timedLore: TimedLoreState;
+    let replyCharName = "";
+    if (isGroup) {
+      const groupParts = buildGroupReplayParts({
+        conv,
+        cards: groupCards,
+        history: conv.messages.slice(0, idx + 1),
+        currentInput: "",
+      });
+      stableSystem = groupParts.stableSystem;
+      lorebook = groupParts.lorebook;
+      summaryPart = groupParts.summary;
+      timedLore = groupParts.timedLore;
+      replyCharName = groupParts.replyCharName;
+    } else {
+      if (!card) return;
+      const persona =
+        charStore.personas.find((p) => p.id === conv.persona_id) ||
+        charStore.getActivePersona() ||
+        null;
+      const books = collectLorebooks({
+        globalLorebook: charStore.globalLorebook,
+        card,
+        enabledIds: charStore.enabledLorebookIds,
+        personaIds: persona?.lorebookIds || [],
+        convIds: conv.lorebookIds || [],
+        byId: charStore.lorebooks,
+      });
+      const parts = buildRpSystemParts({
+        card,
+        persona,
+        preset: charStore.presets,
+        lorebooks: books,
+        recentMessages: conv.messages.slice(0, idx),
+        currentInput: "",
+        summary: conv.summary,
+        timed: conv.timedLore,
+      });
+      stableSystem = parts.stableSystem;
+      lorebook = parts.lorebook;
+      summaryPart = parts.summary;
+      timedLore = mergeTimedLore(conv.timedLore, parts.timedResult);
+    }
     const apiMessages = assembleApiMessages({
-      stableSystem: parts.stableSystem,
+      stableSystem,
       pinned: conv.pinned,
       history: conv.messages.slice(0, idx + 1),
-      lorebook: parts.lorebook,
-      summary: parts.summary,
+      lorebook: isGroup && lorebook ? `【世界观设定】\n${lorebook}` : lorebook,
+      summary: summaryPart,
       // 数据银行/聊天附件(酒馆 Data Bank):续写同样注入
       attachmentBlock: buildAttachmentBlock(conv),
       // 明确要求续写:以原回复结尾为起点继续
@@ -1050,6 +1296,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      if (activeGeneration?.msgId === msgId) activeGeneration = null;
       // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
       // 未刷新的增量在收尾之后才 apply(会重复拼接)
       tavernStreamBatcher.flush();
@@ -1058,19 +1305,45 @@ export const useTavernStore = create<TavernState>((set, get) => ({
         const messages = cur.messages.map((m) => {
           if (m.id !== msgId) return m;
           const full = prefix + acc;
-          const variants = [...(m.variants || [asmMsg.content || ""]), full];
+          // 群聊:自动模式仍按首行【角色名】归属,手动模式固定当前 activeChar(T-024)
+          let content = full;
+          let modelName = m.model;
+          if (isGroup) {
+            const parsed = auto
+              ? parseGroupOwner(
+                  full,
+                  groupCards.map((c) => c.name)
+                )
+              : null;
+            content = parsed?.content ?? full;
+            modelName = parsed?.owner || replyCharName || m.model;
+          }
+          // 取消得太早(还没有任何续写 token):保留原回复,不追加重复版本
+          const previous = m.variants?.[m.variantIndex ?? 0] ?? asmMsg.content ?? "";
+          if (content === previous) {
+            return {
+              ...m,
+              error: errText || m.error,
+              ...(isGroup ? { model: modelName } : {}),
+            };
+          }
+          // variants 与 content 同步(T-025)
+          const variants = [...(m.variants || [asmMsg.content || ""]), content];
           return {
             ...m,
-            content: full,
+            content,
             variants,
             variantIndex: variants.length - 1,
             error: errText || m.error,
+            ...(isGroup ? { model: modelName } : {}),
           };
         });
         await get().saveConv({ ...cur, messages, updated_at: nowISO() });
       }
       set({ isStreaming: false, activeRequestId: null });
     };
+    // T-026:取消路径与正常完成共用同一份收尾(落盘半截续写)
+    activeGeneration = { convId: conv.id, msgId, finish };
 
     try {
       // ⚠️ 续写保持历史行为：只做预算收缩，不跑出站正则（改动会改变对外行为）。
@@ -1129,6 +1402,22 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     } catch (e) {
       void finish(String(e ?? ""));
     }
+  },
+
+  editMessage: async (msgId, content) => {
+    // 编辑正文:variants 是版本展示真源(T-025)。旧实现只写 content,
+    // 而 MessageBubble 渲染 variants[variantIndex] → 编辑后界面毫无变化。
+    // 这里把新内容同时写回当前版本,其余历史版本保持不变。
+    const conv = get().getActive();
+    if (!conv) return;
+    const messages = conv.messages.map((m) => {
+      if (m.id !== msgId) return m;
+      if (!m.variants || m.variants.length === 0) return { ...m, content };
+      const idx = Math.min(Math.max(m.variantIndex ?? 0, 0), m.variants.length - 1);
+      const variants = m.variants.map((v, i) => (i === idx ? content : v));
+      return { ...m, content, variants, variantIndex: idx };
+    });
+    await get().saveConv({ ...conv, messages, updated_at: nowISO() });
   },
 
   sendGroupMessage: async (content) => {
@@ -1289,6 +1578,7 @@ export const useTavernStore = create<TavernState>((set, get) => ({
     const finish = async (errText?: string) => {
       if (finished) return;
       finished = true;
+      if (activeGeneration?.msgId === asmMsg.id) activeGeneration = null;
       // 收尾前先落出挂起帧:finish 读的是 store 里的最终内容/acc,且不能让
       // 未刷新的增量在收尾之后才 apply(会重复拼接)
       tavernStreamBatcher.flush();
@@ -1339,6 +1629,8 @@ export const useTavernStore = create<TavernState>((set, get) => ({
       }
       set({ isStreaming: false, activeRequestId: null });
     };
+    // T-026:取消路径与正常完成共用同一份收尾(落盘半截群聊回复)
+    activeGeneration = { convId: conv.id, msgId: asmMsg.id, finish };
 
     try {
       // 发送前准备(三条链路共用):预算收缩(自动模式,历史超限整段替换为摘要)

@@ -12,6 +12,7 @@ import { useConversationStore } from "@/stores/useConversationStore";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useViewStore } from "@/stores/useViewStore";
 import { useT } from "@/lib/i18n";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 interface Props {
   open: boolean;
@@ -58,18 +59,9 @@ export function CommandPalette({ open, onClose, onOpenSettings }: Props) {
     return undefined;
   }, [open]);
 
-  // 全局 Escape 关闭(焦点不在输入框时也可退出;capture 阻断全局"停止生成"快捷键误触发)
-  useEffect(() => {
-    if (!open) return;
-    const h = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopImmediatePropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", h, true);
-    return () => window.removeEventListener("keydown", h, true);
-  }, [open, onClose]);
+  // 全局 Escape 关闭(焦点不在输入框时也可退出)。T-102:统一走 Escape 层级栈,
+  // 只在命令面板是最上层时消费,不连带关闭下层弹窗/触发全局"停止生成"。
+  useEscapeClose(open ? onClose : undefined);
 
   const items = useMemo<PaletteItem[]>(() => {
     if (!open) return [];

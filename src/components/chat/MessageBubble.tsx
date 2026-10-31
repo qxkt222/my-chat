@@ -105,12 +105,13 @@ export const MessageBubble = memo(function MessageBubble({
   const displayName = isUser ? rpUserName || "You" : rpCharName || message.model || "AI";
   const displayAvatar = isUser ? rpUserAvatar : rpCharAvatar;
 
+  // 复制当前版本(variants 为真源,与气泡显示保持一致;T-025)
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(message.content).then(() => {
+    navigator.clipboard.writeText(rawContent).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
-  }, [message.content]);
+  }, [rawContent]);
 
   if (isSystem) {
     return (
@@ -241,7 +242,9 @@ export const MessageBubble = memo(function MessageBubble({
       </div>
 
       {/* Message actions (Chatbox style) — copy / quote / regenerate */}
-      {message.content && (
+      {/* variants 是版本展示真源:content 暂时为空(流式占位/取消遗留)时,
+          只要当前版本有内容,操作栏就必须可用(T-026) */}
+      {(rawContent || message.content) && (
         <div
           className={`absolute ${isUser ? "left-0 -translate-x-full" : "right-0 translate-x-full"}
             top-1 hidden group-hover:flex items-center gap-0.5 px-1 py-0.5 rounded-md bg-card border border-border shadow-sm`}

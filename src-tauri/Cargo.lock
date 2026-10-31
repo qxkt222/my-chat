@@ -2460,6 +2460,7 @@ name = "my-chat"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "encoding_rs",
  "futures",
  "pdf-extract",
  "reqwest 0.12.28",

@@ -1,13 +1,15 @@
 // lib/context-budget.ts — Token 预算系统(监控 + 手动/自动双模式)
 //
 // 自动模式:发送前按优先级收缩 messages,超限从低优先级裁起;
-// 历史超限时【整段替换为摘要】(不是逐条删——保三段式前缀稳定、DeepSeek 缓存不失效)。
+// 砍完低优先级段后历史仍超限时【整段替换为摘要 + 最后一条 user】(不是逐条删——
+// 保三段式前缀稳定、DeepSeek 缓存不失效;保留本轮输入,请求里必须有 user 轮)。
 // 手动模式:不自动砍,返回各段占用供 UI 提示。
 //
 // 优先级(高→低,超预算从低砍):
 //   P0 stableSystem / 钉住 / 回锚(永不砍——缓存核心)
 //   P1 摘要        P2 向量记忆      P3 世界书
-//   P4 历史        P5 尾部注入(stateBlock/作者注/深度提示词/knowledge/相关记忆)
+//   P4 历史        P5 尾部注入(stateBlock/世界状态/作者注/深度提示词/
+//                  knowledge/相关记忆/数据银行与聊天附件)
 
 import { countTokens } from "@/lib/token-counter";
 import type { BudgetConfig, Message, ModelConfig } from "@/types";
@@ -38,10 +40,32 @@ export function estimateTokens(text: string): number {
   return countTokens(text);
 }
 
+/** 上下文窗口下限。低于它的输入(含 0/负数)会让预算小到所有会话都"超限" */
+export const MIN_CONTEXT_WINDOW = 1024;
+const FALLBACK_CONTEXT_WINDOW = 8192;
+
+/**
+ * T-112: context_window 必须是有限正数，且不低于 MIN_CONTEXT_WINDOW。
+ * 0 / NaN / Infinity / 负数 → undefined(调用方回退默认窗口)；
+ * 正数但过小 → 抬到下限，避免 auto 模式把任意会话误判超限、触发摘要替换。
+ */
+export function sanitizeContextWindow(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.max(MIN_CONTEXT_WINDOW, Math.floor(value));
+}
+
 /** 模型上下文预算:context_window × usage_pct(缺省保守窗口回退 default) */
 export function budgetFor(model: ModelConfig | undefined, cfg: BudgetConfig): number {
-  const window = model?.parameters?.context_window ?? cfg.default_context_window ?? 8192;
-  const pct = Math.min(100, Math.max(10, cfg.usage_pct ?? 90));
+  const window =
+    sanitizeContextWindow(model?.parameters?.context_window) ??
+    sanitizeContextWindow(cfg.default_context_window) ??
+    FALLBACK_CONTEXT_WINDOW;
+  // usage_pct 同样要防 NaN:Math.max(10, NaN) === NaN,会让整个预算变成 NaN
+  const rawPct = cfg.usage_pct;
+  const pct =
+    typeof rawPct === "number" && Number.isFinite(rawPct)
+      ? Math.min(100, Math.max(10, rawPct))
+      : 90;
   return Math.floor((window * pct) / 100);
 }
 
@@ -79,6 +103,11 @@ function segmentMessages(msgs: Pick<Message, "role" | "content">[]): {
     else if (c.startsWith("【世界书") || c.startsWith("【世界观设定】")) push("世界书", 3, i);
     else if (c.startsWith("【作者注】")) push("作者注", 5, i);
     else if (c.startsWith("【深度提示词】")) push("深度提示词", 5, i);
+    // T-111:数据银行/聊天附件(酒馆 Data Bank)与世界状态块都是**可变尾部**,
+    // 不属于 P0 稳定前缀 —— 落进兜底会被永裁不掉,大附件直接撑爆上下文。
+    else if (c.startsWith("【数据银行 / 聊天附件】") || c.startsWith("【聊天附件】"))
+      push("聊天附件", 5, i);
+    else if (c.startsWith("【世界状态】")) push("世界状态", 5, i);
     else if (c.startsWith("【状态") || c.startsWith("【当前时间】")) push("状态块", 5, i);
     else if (c.startsWith("Reference Knowledge")) push("知识上下文", 5, i);
     else push("稳定前缀", 0, i); // 其余 system 默认 P0(stableSystem)
@@ -91,7 +120,8 @@ function segmentMessages(msgs: Pick<Message, "role" | "content">[]): {
  *  - P5 段整体移除(知识上下文/作者注/深度提示词/状态块/相关记忆)
  *  - 再砍 P3 世界书(只保留 score 排序已由 collectLorebookText 做过,这里整段去)
  *  - 再砍 P2 向量记忆、P1 摘要(整段去,最后保 P0)
- *  - 历史超限(自动模式):整段替换为【对话摘要】(若有 conv.summary)——不是逐条删
+ *  - 砍完上述段后历史仍超限(自动模式):替换为【对话摘要】+ 最后一条 user
+ *    (若有 conv.summary)——不是逐条删,且绝不丢掉本轮输入
  * 返回收缩结果;手动模式只返回 over 与占用。
  */
 export function shrinkMessages(
@@ -146,18 +176,37 @@ export function shrinkMessages(
     else historyKept.push(m);
   }
 
-  // 历史仍超限 → 整段替换为摘要(保三段式前缀稳定,缓存不失效);
-  // 没有可用摘要时保留历史,绝不静默删光(超限由 over 标记)。
+  // 历史仍超限(砍完 P5/P3/P2/P1 后 remaining 仍 > budget)→ 整段替换为摘要
+  // (保三段式前缀稳定,缓存不失效);没有可用摘要时保留历史,绝不静默删光。
+  // 两个门控:
+  //  - `remaining > budget`:砍段已回到预算内时不得再追加摘要,否则 P1【对话摘要】
+  //    幸存时会与新增的那条重复(同一份摘要出现两次)。
+  //  - 替换必须保留最后一条 user:三条链路都把本轮输入拼在历史末尾,整段清空会让
+  //    请求里没有任何 user 轮;只替换它之前的更早历史(摘要放在该 user 之前)。
   const summaryText = opts.summary?.trim() ?? "";
-  if (historyMsgs.length > 0) {
-    const histTokens = historyMsgs.reduce((s, m) => s + estimateTokens(m.content), 0);
+  if (remaining > budget && historyMsgs.length > 0) {
+    // target ES2022 无 Array.prototype.findLastIndex,倒序手找最后一条 user
+    let keepUser: Pick<Message, "role" | "content"> | undefined;
+    let lastUserIdx = -1;
+    for (let i = historyMsgs.length - 1; i >= 0; i--) {
+      const m = historyMsgs[i];
+      if (m?.role === "user") {
+        keepUser = m;
+        lastUserIdx = i;
+        break;
+      }
+    }
+    const replacedHistory =
+      lastUserIdx >= 0 ? historyMsgs.filter((_, i) => i !== lastUserIdx) : historyMsgs;
+    const replacedTokens = replacedHistory.reduce((s, m) => s + estimateTokens(m.content), 0);
     const sumTokens = estimateTokens(summaryText);
-    if (summaryText && sumTokens < histTokens) {
+    // 只替换「更早历史」;摘要必须比被替换的部分更小才划算
+    if (summaryText && sumTokens < replacedTokens) {
       historyKept = [
         ...historyKept,
         { role: "system" as const, content: `【对话摘要】\n${summaryText}` },
       ];
-      historyMsgs = [];
+      historyMsgs = keepUser ? [keepUser] : [];
     }
   }
   const working = [...historyKept, ...historyMsgs];

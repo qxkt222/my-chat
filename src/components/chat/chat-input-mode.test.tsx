@@ -380,7 +380,7 @@ describe("对话子模式：/mcp 白名单", () => {
     await waitFor(() => expect(addMessage).toHaveBeenCalledTimes(2));
 
     expect(mocks.mcpListLiteTools).toHaveBeenCalled();
-    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {});
+    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {}, "chat");
     const assistantCall = addMessage.mock.calls[1];
     if (!assistantCall) throw new Error("助手消息未写入会话");
     expect(assistantCall[1].content).toContain("called");
@@ -450,7 +450,7 @@ describe("对话子模式：技能绑定的 MCP 工具受白名单约束", () =>
     await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
 
     const [, , systemPrompt] = sentArgs(sendMessage);
-    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {});
+    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {}, "chat");
     expect(systemPrompt).toContain("called");
   });
 });
@@ -497,7 +497,7 @@ describe("工作子模式：全能力行为不变", () => {
     await typeAndSend("/mcp Srv t1");
     await waitFor(() => expect(addMessage).toHaveBeenCalledTimes(2));
     expect(mocks.mcpListLiteTools).not.toHaveBeenCalled();
-    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {});
+    expect(mocks.mcpCallTool).toHaveBeenCalledWith("srv-1", "t1", {}, "work");
   });
 });
 
@@ -512,5 +512,22 @@ describe("酒馆模式：逻辑完全不动", () => {
     const [, targetModels, systemPrompt] = sentArgs(sendMessage);
     expect(systemPrompt).toContain("PROJECT_RULE");
     expect(targetModels).toHaveLength(1);
+  });
+});
+
+describe("上下文压缩中：输入入口收口（T-019）", () => {
+  it("当前会话压缩中：输入框禁用，点击发送不会发起请求", () => {
+    const { sendMessage } = setup();
+    act(() => {
+      seedConversation();
+      useChatStore.setState({ compressingConvIds: ["c1"] } as never);
+    });
+
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(box.disabled).toBe(true);
+
+    fireEvent.change(box, { target: { value: "压缩期间发送" } });
+    fireEvent.click(screen.getByTitle(t("chat.sendTitle")));
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });

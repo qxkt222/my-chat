@@ -8,9 +8,11 @@ export interface Memory {
   enabled: boolean;
   created_at: string;
   updated_at: string;
+  /** T-077：>1 表示收藏，检索时加权（后端 importance 1.2） */
+  weight: number;
 }
 
-/** Shape returned by the Rust mem_list command */
+/** Shape returned by the Rust mem_list command（T-077：不再包含 embedding） */
 interface MemoryDto {
   id: string;
   content: string;
@@ -18,6 +20,7 @@ interface MemoryDto {
   enabled?: boolean;
   created_at: string;
   updated_at: string;
+  weight?: number;
 }
 
 interface MemoryState {
@@ -27,6 +30,8 @@ interface MemoryState {
   save: (m: Memory) => Promise<void>;
   create: (content: string, tags: string[]) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  /** T-077：切换收藏（weight 1 ↔ 2），让后端检索加权真正生效。 */
+  toggleFavorite: (id: string) => Promise<void>;
   /** 所有记忆条目的标签并集（供技能绑定选择） */
   allTags: () => string[];
   /** 按标签过滤启用的记忆文本（注入 system prompt 用） */
@@ -58,6 +63,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
           enabled: !!m.enabled,
           created_at: m.created_at,
           updated_at: m.updated_at,
+          weight: typeof m.weight === "number" && m.weight > 0 ? m.weight : 1,
         })),
         loaded: true,
       });
@@ -74,6 +80,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       enabled: m.enabled,
       created_at: m.created_at,
       updated_at: nowISO(),
+      weight: m.weight,
     });
     set((s) => ({
       memories: s.memories.map((x) => (x.id === m.id ? { ...m, updated_at: nowISO() } : x)),
@@ -88,6 +95,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       enabled: true,
       created_at: nowISO(),
       updated_at: nowISO(),
+      weight: 1,
     };
     await memSave({
       id: m.id,
@@ -96,6 +104,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       enabled: m.enabled,
       created_at: m.created_at,
       updated_at: m.updated_at,
+      weight: m.weight,
     });
     set((s) => ({ memories: [m, ...s.memories] }));
   },
@@ -103,6 +112,16 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
   remove: async (id) => {
     await memDelete(id);
     set((s) => ({ memories: s.memories.filter((m) => m.id !== id) }));
+  },
+
+  toggleFavorite: async (id) => {
+    const target = get().memories.find((m) => m.id === id);
+    if (!target) return;
+    await get().save({
+      ...target,
+      weight: target.weight > 1 ? 1 : 2,
+      updated_at: nowISO(),
+    });
   },
 
   allTags: () => {

@@ -15,10 +15,18 @@
 
 import type { ModelConfigSource } from "./model-config";
 import { toModelConfig } from "./model-config";
-import { logDiag, streamChat } from "./tauri";
+import { cancelChat, logDiag, streamChat } from "./tauri";
 
 /** 自动摘要阈值：距上次摘要新增消息数（三条链路共用） */
 export const SUMMARIZE_THRESHOLD = 15;
+
+/**
+ * 前端兜底超时（T-117）：摘要完全依赖 Rust 侧事件推进，`done` 一旦丢失，
+ * Promise 就永远悬着，调用方的「压缩中」忙碌状态也永远不解除。
+ * 超时后主动取消后端流（cancelChat）并返回 complete=false，调用方即可清理
+ * 状态、给用户报错并允许重试。
+ */
+export const SUMMARIZE_TIMEOUT_MS = 180_000;
 
 export interface SummarizeOptions {
   model: ModelConfigSource;
@@ -32,6 +40,8 @@ export interface SummarizeOptions {
   onProgress?: (chars: number) => void;
   /** 采样温度（默认 0.3，与旧实现一致） */
   temperature?: number;
+  /** 前端超时毫秒数（默认 SUMMARIZE_TIMEOUT_MS；测试可调小） */
+  timeoutMs?: number;
 }
 
 export interface SummarizeResult {
@@ -63,25 +73,43 @@ export async function runSummarize(opts: SummarizeOptions): Promise<SummarizeRes
   await new Promise<void>((resolve) => {
     let settled = false;
     let failed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       if (settled) return;
       settled = true;
+      if (timer !== undefined) clearTimeout(timer);
       resolve();
     };
+
+    // 前端兜底超时：done 事件丢失时结束等待，并主动中断 Rust 侧流，
+    // 否则会一直占用请求/连接。complete 保持 false，半截内容不会落盘。
+    const timeoutMs = opts.timeoutMs ?? SUMMARIZE_TIMEOUT_MS;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        logDiag(`${label} timeout after ${timeoutMs}ms (request_id=${requestId})`);
+        cancelChat(requestId);
+        finish();
+      }, timeoutMs);
+    }
 
     // streamChat 自身的 Promise 只覆盖「事件监听注册 + invoke 启动」，
     // 流内容由回调推进——所以这里不能 await 它的 resolve，只能接住 reject。
     void Promise.resolve(
       streamChat(request, requestId, {
         onToken: (d) => {
+          // 超时/取消后的迟到 token 不再推进进度或内容
+          if (settled) return;
           acc += d;
           opts.onProgress?.(acc.length);
         },
         onDone: () => {
+          if (settled) return;
           complete = true;
           finish();
         },
         onError: (e) => {
+          if (settled) return;
           failed = true;
           logDiag(`${label} error: ${String(e)}`);
           finish();

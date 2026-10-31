@@ -639,5 +639,89 @@ export interface BackupInfoDto {
   size_mb: number;
 }
 
+// ── Translation (专业引擎 / 本地 OpenAI 兼容端点) ────────
+/** 翻译引擎：local = Ollama / LM Studio / llama.cpp server 等 OpenAI 兼容端点 */
+export type TranslateEngine = "google" | "deepl" | "libre" | "local";
+
+/** 本地翻译模型配置；字段与 Rust `LocalLlm` 同形（camelCase 走 serde） */
+export interface LocalTranslateConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  temperature: number;
+  systemPrompt: string;
+  timeoutSecs: number;
+}
+
+/** `translate_text` 的命令参数结构（Rust `TranslateOptions`） */
+export interface TranslateOptions {
+  engine: TranslateEngine;
+  targetLang: string;
+  deeplKey: string;
+  libreUrl: string;
+  proxyUrl: string;
+  local?: LocalTranslateConfig | null;
+}
+
+// ── Drawing (OpenAI 兼容 / ComfyUI / SD WebUI) ───────────
+/** 绘图引擎：openai = /images/generations 兼容端点 */
+export type DrawEngine = "openai" | "comfyui" | "sdwebui";
+
+/** `generate_image` 的请求结构（Rust `DrawRequest`） */
+export interface DrawRequest {
+  engine: DrawEngine;
+  /** 服务根地址（Rust 侧归一化：去尾斜杠 / `/chat/completions` / 尾部 `/vN`） */
+  baseUrl: string;
+  apiKey?: string | null;
+  model?: string | null;
+  prompt: string;
+  negativePrompt?: string | null;
+  size: string;
+  steps?: number | null;
+  cfgScale?: number | null;
+  seed?: number | null;
+  sampler?: string | null;
+  workflowJson?: string | null;
+}
+
+/** 已落盘的生成图片（Rust `GenImage`） */
+export interface GenImage {
+  path: string;
+  mime: string;
+}
+
+/** 出图服务探测结果（Rust `DrawServiceInfo`） */
+export interface DrawServiceInfo {
+  online: boolean;
+  models: string[];
+  samplers: string[];
+}
+
+// ── 内置 llama.cpp 运行时（用户自备 llama-server.exe + GGUF）──
+/** `llama_start` 的启动配置（Rust `LlamaConfig`，camelCase 走 serde） */
+export interface LlamaConfig {
+  /** llama-server.exe 绝对路径 */
+  serverPath: string;
+  /** .gguf 模型绝对路径 */
+  modelPath: string;
+  /** 上下文长度；缺省 4096（由后端补默认值） */
+  ctxSize?: number;
+  /** 卸载到 GPU 的层数；缺省 0（纯 CPU） */
+  nGpuLayers?: number;
+  /** 端口；缺省时后端自动分配 */
+  port?: number;
+  /** 追加到命令行的额外参数 */
+  extraArgs?: string[];
+}
+
+/** `llama_start` / `llama_status` 的运行状态（Rust `LlamaStatus`） */
+export interface LlamaStatus {
+  running: boolean;
+  port?: number;
+  pid?: number;
+  /** 最近一次启动失败或进程异常退出的可读原因 */
+  error?: string;
+}
+
 // ── Theme ────────────────────────────────────────────────
 export type ThemeMode = "light" | "dark" | "system";

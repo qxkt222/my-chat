@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Wand2, Plus, Trash2, Eye, Upload } from "lucide-react";
 import { useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
-import { applyRegexRules } from "@/lib/regex-format";
+import { applyRegexRules, type RegexRule } from "@/lib/regex-format";
 import { compileRegex } from "@/lib/regex-cache";
 import { looksLikeRegexSuite, parseTavernRegexSuite } from "@/lib/regex-import";
 import { readFile, pickFile } from "@/lib/tauri";
@@ -22,6 +22,8 @@ export function RegexManager({ onBack }: { onBack?: (() => void) | undefined }) 
     name: string;
     pattern: string;
     replacement: string;
+    /** 编辑既有规则时保留原对象,提交时展开,避免丢掉 flags/enabled/placement/depth */
+    base?: RegexRule | undefined;
   } | null>(null);
   const [preview, setPreview] = useState("");
 
@@ -54,21 +56,40 @@ export function RegexManager({ onBack }: { onBack?: (() => void) | undefined }) 
     }
   };
 
-  const startNew = () => setEditing({ id: "", name: "", pattern: "", replacement: "" });
+  const startNew = () =>
+    setEditing({ id: "", name: "", pattern: "", replacement: "", base: undefined });
   const startEdit = (id: string) => {
     const r = s.regexRules.find((x) => x.id === id);
-    if (r) setEditing({ id: r.id, name: r.name, pattern: r.pattern, replacement: r.replacement });
+    if (r)
+      setEditing({
+        id: r.id,
+        name: r.name,
+        pattern: r.pattern,
+        replacement: r.replacement,
+        base: r,
+      });
   };
 
   const save = async () => {
     if (!editing || !editing.pattern.trim()) return;
-    await s.saveRegexRule({
-      id: editing.id || `user-${crypto.randomUUID()}`,
-      name: editing.name.trim() || "自定义规则",
-      pattern: editing.pattern,
-      replacement: editing.replacement,
-      enabled: true,
-    });
+    // T-099:编辑既有规则必须复制原对象。旧实现固定 enabled:true 且不带 flags,
+    // 编辑一条带 i 的**已禁用**规则会把它静默启用并改变大小写匹配行为。
+    const rule: RegexRule = editing.base
+      ? {
+          ...editing.base,
+          name: editing.name.trim() || editing.base.name,
+          pattern: editing.pattern,
+          replacement: editing.replacement,
+        }
+      : {
+          id: editing.id || `user-${crypto.randomUUID()}`,
+          name: editing.name.trim() || "自定义规则",
+          pattern: editing.pattern,
+          replacement: editing.replacement,
+          enabled: true,
+          flags: "g",
+        };
+    await s.saveRegexRule(rule);
     setEditing(null);
   };
 

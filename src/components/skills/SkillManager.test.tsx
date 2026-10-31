@@ -7,7 +7,7 @@
 //   3. 勾选后保存，create 载荷必须带 lite_enabled=true（否则开关形同虚设）。
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 
 import type { Skill } from "@/types";
 
@@ -87,6 +87,60 @@ describe("SkillManager 对话模式可用", () => {
     await waitFor(() =>
       expect(storeState.create).toHaveBeenCalledWith(
         expect.objectContaining({ lite_enabled: true })
+      )
+    );
+  });
+});
+
+// T-103：openEdit 曾用裸 JSON.parse —— JSON 合法但非数组时把对象塞进 tools，
+// 渲染期 `edit.tools.includes` 抛错白屏。现在降级为 [] 并提示。
+describe("SkillManager 坏 JSON 字段降级", () => {
+  /** 找到某个技能卡片并点开编辑 */
+  function openEditOf(name: string) {
+    const row = screen.getByText(name).closest(".border");
+    if (!row) throw new Error("找不到技能行");
+    const editBtn = within(row as HTMLElement).getAllByRole("button")[0];
+    if (!editBtn) throw new Error("找不到编辑按钮");
+    fireEvent.click(editBtn);
+  }
+
+  it("tools_json 是合法 JSON 但非数组：不崩溃、可打开编辑、降级为空并提示", async () => {
+    storeState.skills = [
+      skill({ id: "bad", name: "Bad", tools_json: '{"oops":true}', memory_tags: '["m1"]' }),
+    ];
+    render(<SkillManager />);
+
+    // 列表渲染不抛错
+    expect(screen.getByText("Bad")).toBeTruthy();
+
+    openEditOf("Bad");
+    // 编辑弹层正常打开（此前这里渲染期就抛错了）
+    expect(screen.getByText("skills.edit")).toBeTruthy();
+    expect(screen.getByText(/技能数据异常.*tools_json/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("settings.save"));
+    await waitFor(() =>
+      expect(storeState.save).toHaveBeenCalledWith(
+        expect.objectContaining({ tools_json: "[]", memory_tags: '["m1"]' })
+      )
+    );
+  });
+
+  it("坏 JSON 字符串：两个字段都降级为空，仍可保存", async () => {
+    storeState.skills = [
+      skill({ id: "bad2", name: "Bad2", tools_json: "{oops", memory_tags: "not-json" }),
+    ];
+    render(<SkillManager />);
+
+    openEditOf("Bad2");
+    const warning = screen.getByText(/技能数据异常/);
+    expect(warning.textContent).toContain("tools_json");
+    expect(warning.textContent).toContain("memory_tags");
+
+    fireEvent.click(screen.getByText("settings.save"));
+    await waitFor(() =>
+      expect(storeState.save).toHaveBeenCalledWith(
+        expect.objectContaining({ tools_json: "[]", memory_tags: "[]" })
       )
     );
   });

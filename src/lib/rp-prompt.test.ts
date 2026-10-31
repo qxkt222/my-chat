@@ -1,6 +1,8 @@
 // lib/rp-prompt.test.ts — 角色扮演三段式(深度提示词/正则世界书/摘要)
 import { describe, it, expect } from "vitest";
 import {
+  buildGroupSystemParts,
+  buildGroupSystemPrompt,
   buildRpSystemParts,
   buildRpSystemPrompt,
   collectLorebookText,
@@ -128,6 +130,125 @@ describe("buildRpSystemParts", () => {
       currentInput: "x",
     });
     expect(p.depthPrompt).toBeUndefined();
+  });
+});
+
+// ── T-115:卡片字段内部的 {{char}}/{{user}} 也必须替换 ───────────────
+describe("swapVars 宏替换顺序（T-115）", () => {
+  const persona = {
+    id: "p1",
+    name: "佩拉",
+    description: "调查员",
+    avatarPath: "",
+    lorebookIds: [],
+    created_at: "",
+  };
+
+  it("description/personality 里的 {{char}}/{{user}} 被替换（单聊）", () => {
+    const withMacros = {
+      ...card,
+      description: "{{char}} 的伙伴是 {{user}}",
+      personality: "{{char}} 性格内向",
+    } as CharacterCard;
+    const parts = buildRpSystemParts({
+      card: withMacros,
+      persona,
+      preset: entry("t", "你是 {{char}}。{{description}} {{personality}}"),
+      lorebooks: [],
+      recentMessages: [],
+      currentInput: "",
+    });
+    expect(parts.stableSystem).toContain("芙兰 的伙伴是 佩拉");
+    expect(parts.stableSystem).toContain("芙兰 性格内向");
+    expect(parts.stableSystem).not.toContain("{{char}}");
+    expect(parts.stableSystem).not.toContain("{{user}}");
+  });
+
+  it("群聊与单聊一致：角色定义里的宏同样被替换", () => {
+    const withMacros = {
+      ...card,
+      description: "{{char}} 与 {{user}} 是同伴",
+    } as CharacterCard;
+    const parts = buildGroupSystemParts({
+      cards: [withMacros],
+      persona,
+      personaName: "佩拉",
+      lorebooks: [],
+      recentMessages: [],
+      currentInput: "",
+    });
+    expect(parts.stableSystem).toContain("芙兰 与 佩拉 是同伴");
+    expect(parts.stableSystem).not.toContain("{{char}}");
+    expect(parts.stableSystem).not.toContain("{{user}}");
+  });
+});
+
+// ── T-114:群聊世界书双层标题 ────────────────────────────────────────
+describe("群聊世界书标题（T-114）", () => {
+  it("lorebook 已自带【世界书 / 世界观设定】时不再套【世界观设定】", () => {
+    const prompt = buildGroupSystemPrompt({
+      cards: [card],
+      persona: null,
+      lorebooks: [{ entries: [{ keys: ["火焰"], content: "火球术可以点燃一切" }] }],
+      recentMessages: [{ role: "user", content: "火焰" }],
+      currentInput: "",
+    });
+    expect(prompt.match(/【世界书 \/ 世界观设定】/g)).toHaveLength(1);
+    expect(prompt).not.toContain("【世界观设定】\n【世界书");
+    // 无头文本才补标题的兜底分支仍保留
+    const parts = buildGroupSystemParts({
+      cards: [card],
+      persona: null,
+      lorebooks: [{ entries: [{ keys: ["火焰"], content: "火球术可以点燃一切" }] }],
+      recentMessages: [{ role: "user", content: "火焰" }],
+      currentInput: "",
+    });
+    expect(parts.lorebook.startsWith("【世界书")).toBe(true);
+  });
+});
+
+// ── T-116:scan_depth 语义 ───────────────────────────────────────────
+describe("世界书 scan_depth（T-116）", () => {
+  it("scan_depth=0 不扫描历史（只扫当前输入）", () => {
+    const books = [
+      {
+        scan_depth: 0,
+        entries: [{ keys: ["王都"], content: "王都条目" }],
+      },
+    ];
+    // 历史里有关键词、当前输入没有 → 0 深度不得命中
+    const fromHistory = collectLorebookText(books, [{ role: "user", content: "去王都" }], "");
+    expect(fromHistory).not.toContain("王都条目");
+    // 当前输入仍应扫描
+    const fromInput = collectLorebookText(books, [], "去王都");
+    expect(fromInput).toContain("王都条目");
+  });
+
+  it("正数深度只扫描最近 N 条", () => {
+    const books = [
+      {
+        scan_depth: 1,
+        entries: [{ keys: ["王都"], content: "王都条目" }],
+      },
+    ];
+    const hit = collectLorebookText(
+      books,
+      [
+        { role: "user", content: "去王都" }, // 更早，超出 depth 1
+        { role: "assistant", content: "好的" },
+      ],
+      ""
+    );
+    expect(hit).not.toContain("王都条目");
+    const hitLast = collectLorebookText(
+      books,
+      [
+        { role: "user", content: "无关" },
+        { role: "assistant", content: "去王都" },
+      ],
+      ""
+    );
+    expect(hitLast).toContain("王都条目");
   });
 });
 

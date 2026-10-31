@@ -20,12 +20,13 @@ import {
   moveWithin,
   orderOf,
   groupOf,
+  registerRosterIndex,
   splitByGroup,
   emptyRosterIndex,
   UNGROUPED,
   UNGROUPED_LABEL,
 } from "./preset-roster";
-import type { PromptPreset } from "@/types";
+import type { PresetRosterIndex, PromptPreset } from "@/types";
 
 /** 造条目；不传 enabled/group/order 时**不写这三个键**，模拟旧数据 */
 function mk(id: string, template: string, extra: Partial<PromptPreset> = {}): PromptPreset {
@@ -80,7 +81,7 @@ describe("拼装", () => {
     expect(assembleRoster(list)).toBe("该出现");
   });
 
-  it("缺 order 的排最后；同 order 保持入参相对顺序（缓存前缀稳定）", () => {
+  it("缺 order 的排最后；同 order 按 id 兜底（不随入参数组顺序漂移）", () => {
     const list = [
       mk("no-order", "无序", { enabled: true }),
       mk("o2", "有序2", { enabled: true, order: 2 }),
@@ -112,6 +113,78 @@ describe("拼装", () => {
     ];
     expect(orderOf(list[0] as PromptPreset)).toBe(Number.MAX_SAFE_INTEGER);
     expect(assembleRoster(list)).toBe("正常序\n\n非法序");
+  });
+});
+
+// ── T-031：多包同时启用时，拼装顺序必须跨重启稳定 ──────────────────
+//
+// 每个导入包的 order 都从 0 开始（preset-import.ts:141），跨包必然重复；
+// 旧实现同 order 时按入参数组下标兜底，而该数组重启后来自 listDir（未排序）。
+// 修复：先按 groupOrder/包名分组，再在组内按 order 排。
+describe("跨包拼装顺序（T-031：缓存前缀不随重启漂移）", () => {
+  /** 两个包，组内 order 都是 0,1 —— 与 preset-import 落盘的数据同构 */
+  const packA = [
+    mk("a0", "A0", { enabled: true, group: "包A", order: 0 }),
+    mk("a1", "A1", { enabled: true, group: "包A", order: 1 }),
+  ];
+  const packB = [
+    mk("b0", "B0", { enabled: true, group: "包B", order: 0 }),
+    mk("b1", "B1", { enabled: true, group: "包B", order: 1 }),
+  ];
+  const idx = (groupOrder: string[]): PresetRosterIndex => ({
+    groupOrder,
+    entryOrder: {},
+    updated_at: "",
+  });
+
+  it("按 groupOrder 决定跨包顺序，不随入参数组顺序变化", () => {
+    const declared = idx(["包B", "包A"]);
+    expect(assembleRoster([...packA, ...packB], declared)).toBe("B0\n\nB1\n\nA0\n\nA1");
+    expect(assembleRoster([...packB, ...packA], declared)).toBe("B0\n\nB1\n\nA0\n\nA1");
+  });
+
+  it("反转整个输入数组，输出逐字不变", () => {
+    const declared = idx(["包A", "包B"]);
+    const forward = assembleRoster([...packA, ...packB], declared);
+    const backward = assembleRoster([...packA, ...packB].reverse(), declared);
+    expect(forward).toBe("A0\n\nA1\n\nB0\n\nB1");
+    expect(backward).toBe(forward);
+  });
+
+  it("未设 groupOrder（或索引缺失）时按包名字典序", () => {
+    const expected = "A0\n\nA1\n\nB0\n\nB1";
+    expect(assembleRoster([...packB, ...packA], emptyRosterIndex())).toBe(expected);
+    // 完全不传索引（老调用点）也必须是确定顺序
+    expect(assembleRoster([...packB, ...packA])).toBe(expected);
+  });
+
+  it("groupOrder 未列出的包按包名字典序排在已声明包之后", () => {
+    const declared = idx(["包B"]);
+    expect(assembleRoster([...packA, ...packB], declared)).toBe("B0\n\nB1\n\nA0\n\nA1");
+  });
+
+  it("未分组条目（内置/自定义）恒定排在所有包之后", () => {
+    const list = [mk("custom", "自定义", { enabled: true }), ...packB, ...packA];
+    expect(assembleRoster(list, idx(["包A"]))).toBe("A0\n\nA1\n\nB0\n\nB1\n\n自定义");
+  });
+
+  it("组内同 order 时按 id 兜底：反转输入顺序仍逐字一致", () => {
+    const list = [
+      mk("x2", "X2", { enabled: true, group: "包A", order: 0 }),
+      mk("x1", "X1", { enabled: true, group: "包A", order: 0 }),
+    ];
+    const declared = idx(["包A"]);
+    expect(assembleRoster(list, declared)).toBe("X1\n\nX2");
+    expect(assembleRoster([...list].reverse(), declared)).toBe("X1\n\nX2");
+  });
+
+  it("store 登记的索引参与默认拼装（生产入口只传 presets，拿不到索引）", () => {
+    registerRosterIndex(idx(["包B", "包A"]));
+    try {
+      expect(assembleRoster([...packA, ...packB])).toBe("B0\n\nB1\n\nA0\n\nA1");
+    } finally {
+      registerRosterIndex(null); // 不把全局状态漏给同文件其它用例
+    }
   });
 });
 

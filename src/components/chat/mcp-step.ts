@@ -69,7 +69,9 @@ export async function runMcpStep(
       argsObj = { query: tpl };
     }
   }
-  const r = await mcpCallTool(server.id, tool.name, argsObj);
+  // 门禁存在 = 对话模式；此时后端还要再校验一次白名单（双重校验，T-130）。
+  // 无门禁 = 工作模式，显式声明 scope="work" 才不受白名单约束。
+  const r = await mcpCallTool(server.id, tool.name, argsObj, allowStep ? "chat" : "work");
   return r.content || t("chat.mcpEmptyResult");
 }
 

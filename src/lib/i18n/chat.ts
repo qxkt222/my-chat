@@ -213,12 +213,91 @@ export const chatMessages: Record<string, Record<string, string>> = {
   "translate.engineGoogle": { zh: "Google(免费,无需 Key)", en: "Google (free, no key)" },
   "translate.engineDeepl": { zh: "DeepL(需 API Key)", en: "DeepL (needs API key)" },
   "translate.engineLibre": { zh: "LibreTranslate(自托管)", en: "LibreTranslate (self-hosted)" },
+  "translate.engineLocal": {
+    zh: "本地(OpenAI 兼容)",
+    en: "Local (OpenAI compatible)",
+  },
   "translate.engineHint": {
     zh: "酒馆的逐条/自动翻译与测试面板均用此引擎",
     en: "Used by tavern manual/auto translation and this test panel",
   },
   "translate.deeplKey": { zh: "DeepL Key", en: "DeepL Key" },
   "translate.libreUrl": { zh: "服务地址", en: "Server URL" },
+  // ── 翻译引擎:本地 OpenAI 兼容端点(Ollama / LM Studio / llama.cpp server)──
+  "translate.localBaseUrl": { zh: "服务地址", en: "Base URL" },
+  "translate.localBaseUrlHint": {
+    zh: "Ollama 默认 http://127.0.0.1:11434/v1;LM Studio / llama.cpp 填各自的 /v1 地址",
+    en: "Ollama default: http://127.0.0.1:11434/v1; LM Studio / llama.cpp use their own /v1 URL",
+  },
+  "translate.localApiKey": { zh: "API Key", en: "API Key" },
+  "translate.localApiKeyPlaceholder": {
+    zh: "可留空(Ollama 默认无鉴权)",
+    en: "Optional (Ollama usually has no auth)",
+  },
+  "translate.localModel": { zh: "模型", en: "Model" },
+  "translate.localModelPlaceholder": {
+    zh: "如 qwen2.5:7b",
+    en: "e.g. qwen2.5:7b",
+  },
+  "translate.localFetchModels": { zh: "拉取模型", en: "Fetch models" },
+  "translate.localFetching": { zh: "拉取中…", en: "Fetching…" },
+  "translate.localModelsFetched": {
+    zh: "已拉取 {n} 个模型,可从下拉选择",
+    en: "Fetched {n} models — pick one from the list",
+  },
+  "translate.localModelsEmpty": {
+    zh: "端点未返回模型,请手动填写模型名",
+    en: "No models returned — enter the model name manually",
+  },
+  "translate.localSystemPrompt": { zh: "System Prompt", en: "System Prompt" },
+  "translate.localSystemPromptPlaceholder": {
+    zh: "留空使用内置翻译提示词",
+    en: "Empty = built-in translation prompt",
+  },
+  "translate.localTemperature": { zh: "Temperature", en: "Temperature" },
+  "translate.localTimeout": { zh: "超时(秒)", en: "Timeout (s)" },
+  // ── 翻译引擎:内置 llama.cpp 运行时(用户自备 llama-server.exe + GGUF)──
+  "translate.llama.title": { zh: "内置运行时（llama.cpp）", en: "Built-in runtime (llama.cpp)" },
+  "translate.llama.subtitle": {
+    zh: "选择 llama-server.exe 与 .gguf，启动后自动填入服务地址",
+    en: "Pick llama-server.exe and a .gguf; Base URL is filled in on start",
+  },
+  "translate.llama.serverPath": { zh: "llama-server 路径", en: "llama-server path" },
+  "translate.llama.serverPathPlaceholder": {
+    zh: "C:\\...\\llama-server.exe",
+    en: "C:\\...\\llama-server.exe",
+  },
+  "translate.llama.modelPath": { zh: "GGUF 模型", en: "GGUF model" },
+  "translate.llama.modelPathPlaceholder": { zh: "C:\\...\\model.gguf", en: "C:\\...\\model.gguf" },
+  "translate.llama.choose": { zh: "选择…", en: "Browse…" },
+  "translate.llama.chooseServer": {
+    zh: "选择 llama-server 可执行文件",
+    en: "Choose llama-server executable",
+  },
+  "translate.llama.chooseModel": { zh: "选择 GGUF 模型文件", en: "Choose GGUF model file" },
+  "translate.llama.ctx": { zh: "上下文(ctx)", en: "Context (ctx)" },
+  "translate.llama.ctxPlaceholder": { zh: "4096（默认）", en: "4096 (default)" },
+  "translate.llama.gpuLayers": { zh: "GPU 层数", en: "GPU layers" },
+  "translate.llama.gpuLayersPlaceholder": { zh: "0（纯 CPU）", en: "0 (CPU only)" },
+  "translate.llama.port": { zh: "端口", en: "Port" },
+  "translate.llama.portPlaceholder": { zh: "留空自动", en: "auto if empty" },
+  "translate.llama.start": { zh: "启动", en: "Start" },
+  "translate.llama.starting": { zh: "启动中…", en: "Starting…" },
+  "translate.llama.stop": { zh: "停止", en: "Stop" },
+  "translate.llama.stopped": { zh: "未运行", en: "Stopped" },
+  "translate.llama.running": {
+    zh: "运行中 · 端口 {port} · pid {pid}",
+    en: "Running · port {port} · pid {pid}",
+  },
+  "translate.llama.failed": { zh: "启动失败", en: "Start failed" },
+  "translate.llama.pathsRequired": {
+    zh: "先选择 llama-server 与 .gguf 模型",
+    en: "Choose llama-server and a .gguf model first",
+  },
+  "translate.llama.autoFilled": {
+    zh: "已自动填入 Base URL：{url}",
+    en: "Base URL filled automatically: {url}",
+  },
   "translate.proxy": { zh: "代理", en: "Proxy" },
   "translate.proxyHint": {
     zh: "国内访问 Google/DeepL 必需(同 SearXNG 的代理);留空直连",

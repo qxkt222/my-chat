@@ -31,12 +31,40 @@ export function getSubModels(provider: string): string[] {
   return SUB_MODELS[provider] || [];
 }
 
-// Fetch models via API (OpenAI-compatible /v1/models endpoint)
+/**
+ * 由 api_url 推导「模型列表」地址（OpenAI 兼容 /models）。
+ *
+ * T-113:旧实现无条件拼 `${base}/v1/models`,当用户填的 api_url 已经带 /v1
+ * (如 `https://api.deepseek.com/v1`)会变成 `/v1/v1/models` → 404,
+ * 填完整 chat 端点(`.../chat/completions`)同样 404。
+ * 这里与 Rust `adapters::engine::build_api_url` 的三形态保持一致:
+ *   · 完整 chat 端点 `…/chat/completions` → 同级 `…/models`
+ *   · 已带版本段 `…/v1` / `…/v2`        → `…/v1/models`
+ *   · 裸 base                           → `…/v1/models`
+ * 另外 `…/models` 原样返回(幂等,便于直接填列表端点)。
+ */
+export function buildModelsUrl(apiUrl: string): string {
+  const base = apiUrl.trim().replace(/\/+$/, "");
+  if (!base) throw new Error("api_url 为空,无法拉取模型列表");
+  if (base.endsWith("/models")) return base;
+  if (base.endsWith("/chat/completions")) {
+    return `${base.slice(0, -"/chat/completions".length)}/models`;
+  }
+  if (base.endsWith("/v1") || base.endsWith("/v2")) return `${base}/models`;
+  return `${base}/v1/models`;
+}
+
+// Fetch models via API (OpenAI-compatible /models endpoint)
 export async function fetchModelsFromAPI(apiUrl: string, apiKey: string): Promise<string[]> {
-  const base = apiUrl.replace(/\/+$/, "");
-  const url = `${base}/v1/models`;
+  const url = buildModelsUrl(apiUrl);
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    // 失败不再只抛一个裸状态码:带上实际请求的 URL 与响应体片段,
+    // 调用方即便回退静态列表,日志/错误里也能看出是拼接错还是鉴权失败。
+    const body = await resp.text().catch(() => "");
+    const detail = body.trim().slice(0, 200);
+    throw new Error(`HTTP ${resp.status} ${url}${detail ? ` — ${detail}` : ""}`);
+  }
   const data = (await resp.json()) as { data?: { id?: string }[] };
   return (data.data || [])
     .map((m) => m.id || "")

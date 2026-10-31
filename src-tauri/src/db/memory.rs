@@ -60,12 +60,21 @@ pub fn search_memories(query_emb: &[f32], top_k: usize) -> Result<Vec<(Memory, f
         // 新鲜度:按列表位置(updated_at 已降序,越靠前越新)→ 新记忆近 1.0
         let freshness = 0.5 + 0.5 * (1.0 - idx as f32 / total);
         // 重要性:收藏/点赞的记忆 weight>1 → 加权
-        let importance = if m.weight > 1.0 { 1.2 } else { 1.0 };
+        let importance = importance_factor(m.weight);
         scored.push((m, sim * freshness * importance));
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top_k);
     Ok(scored)
+}
+
+/// 收藏/点赞（weight>1）的记忆在检索时加权 1.2（T-077）。
+fn importance_factor(weight: f32) -> f32 {
+    if weight > 1.0 {
+        1.2
+    } else {
+        1.0
+    }
 }
 
 fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
@@ -119,4 +128,18 @@ pub fn delete_memory(id: &str) -> Result<(), String> {
         .remove(key("mem", id))
         .map_err(|e| format!("Del: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::importance_factor;
+
+    /// T-077 验收：收藏（weight>1）后检索权重生效。
+    #[test]
+    fn favorited_memory_gets_importance_boost() {
+        assert!((importance_factor(2.0) - 1.2).abs() < f32::EPSILON);
+        assert!((importance_factor(1.0) - 1.0).abs() < f32::EPSILON);
+        // 旧数据 weight=0 不加权（不是惩罚）
+        assert!((importance_factor(0.0) - 1.0).abs() < f32::EPSILON);
+    }
 }

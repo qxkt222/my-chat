@@ -11,6 +11,8 @@
 //   - 解析失败仍由调用方的 try/catch 兜底（本文件只处理「解析成功但结构坏」）。
 
 import type {
+  AdapterMode,
+  ApiTemplate,
   BudgetConfig,
   CharacterBook,
   CharacterCard,
@@ -65,12 +67,19 @@ function sanitizePlacement(v: unknown): number[] | undefined {
   return [...set].sort((a, b) => a - b);
 }
 
-function sanitizeFlags(v: unknown): string | undefined {
+/**
+ * 正则 flags 归一化（persist-sanitize 与导入侧共用同一套语义）：
+ *  - 只接受 JS 合法标志字符，否则整体丢弃；
+ *  - 去重（`gg` → `g`，new RegExp 对重复标志会抛）；
+ *  - `u` 与 `v` 互斥（Unicode / Unicode sets），同时出现 `new RegExp` 必然抛
+ *    → 规则会静默失效（T-141）。互斥组合直接丢弃 flags，交给下游默认语义。
+ */
+export function normalizeRegexFlags(v: unknown): string | undefined {
   if (typeof v !== "string" || v.length === 0) return undefined;
-  // 只接受 JS 正则合法标志；含非法字符/重复标志 → 丢弃（下游 new RegExp 会抛）
   if (!/^[dgimsuvy]+$/.test(v)) return undefined;
-  const deduped = [...new Set(v)].join("");
-  return deduped;
+  const deduped = [...new Set(v)];
+  if (deduped.includes("u") && deduped.includes("v")) return undefined;
+  return deduped.join("");
 }
 
 export function sanitizeRegexRule(raw: unknown): RegexRule {
@@ -81,7 +90,7 @@ export function sanitizeRegexRule(raw: unknown): RegexRule {
     pattern: asString(o.pattern),
     replacement: asString(o.replacement),
     enabled: typeof o.enabled === "boolean" ? o.enabled : true,
-    flags: sanitizeFlags(o.flags),
+    flags: normalizeRegexFlags(o.flags),
     placement: sanitizePlacement(o.placement),
     minDepth:
       typeof o.minDepth === "number" && Number.isFinite(o.minDepth) ? o.minDepth : undefined,
@@ -154,6 +163,52 @@ export function sanitizeConnectionProfiles(raw: unknown): ConnectionProfile[] {
     out.push(p);
   }
   return out;
+}
+
+// ── ApiTemplate（adapters/*.json）─────────────────────────
+const ADAPTER_MODES: readonly AdapterMode[] = ["simple", "medium", "advanced"];
+
+function isAdapterMode(v: unknown): v is AdapterMode {
+  return typeof v === "string" && (ADAPTER_MODES as readonly string[]).includes(v);
+}
+
+/** 请求头：只保留字符串键值；null / 数组 / 非对象一律回落空对象 */
+function sanitizeStringRecord(raw: unknown): Record<string, string> {
+  if (!isRecord(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * 适配器模板（T-136）：`adapters/*.json` 是用户可直接手改的文件，
+ * 之前 `JSON.parse(raw) as ApiTemplate` 会把 `request_headers: null`
+ * 原样带进渲染层（`Object.keys(null)` / 展开即崩）。这里逐字段校验并给默认值。
+ */
+export function sanitizeApiTemplate(raw: unknown): ApiTemplate {
+  const o = isRecord(raw) ? raw : {};
+  return {
+    id: asString(o.id),
+    name: asString(o.name),
+    mode: isAdapterMode(o.mode) ? o.mode : "simple",
+    api_url: asString(o.api_url),
+    // exactOptionalPropertyTypes:可选字段不能显式写 undefined,只在有值时展开
+    ...(typeof o.api_key_encrypted === "string" ? { api_key_encrypted: o.api_key_encrypted } : {}),
+    request_method: o.request_method === "GET" ? "GET" : "POST",
+    request_headers: sanitizeStringRecord(o.request_headers),
+    request_body_template: asString(o.request_body_template),
+    sse_enabled: typeof o.sse_enabled === "boolean" ? o.sse_enabled : true,
+    sse_data_prefix: asString(o.sse_data_prefix, "data: "),
+    sse_done_marker: asString(o.sse_done_marker, "[DONE]"),
+    sse_content_path: asString(o.sse_content_path, "$.choices[0].delta.content"),
+    response_content_path: asString(o.response_content_path),
+    category: asString(o.category),
+    is_preset: o.is_preset === true,
+    created_at: asString(o.created_at),
+    updated_at: asString(o.updated_at),
+  };
 }
 
 // ── CharacterBook / LoreEntry ────────────────────────────

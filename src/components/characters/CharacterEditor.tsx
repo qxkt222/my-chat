@@ -7,7 +7,8 @@ import { pickFile, readFileBytes, getAppDir, writeFileBytes } from "@/lib/tauri"
 import { showToast } from "@/components/ui/Toast";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { emotionKeys, emotionImagePath } from "@/lib/emotion";
-import type { CharacterCard, LoreEntry } from "@/types";
+import { loreEntriesToText, mergeLoreBook } from "@/lib/character-card";
+import type { CharacterCard } from "@/types";
 
 interface Props {
   card: CharacterCard;
@@ -23,8 +24,9 @@ export function CharacterEditor({ card, isNew, onClose }: Props) {
   // Escape 关闭(此前只有右上角 X)
   useEscapeClose(onClose);
   const [form, setForm] = useState<CharacterCard>({ ...card });
-  const [loreText, setLoreText] = useState(
-    (card.character_book?.entries || []).map((e) => `${e.keys.join(",")}:${e.content}`).join("\n")
+  // 行格式只用于显示:多行内容被转义成一行,保存时再按索引合并回原条目
+  const [loreText, setLoreText] = useState(() =>
+    loreEntriesToText(card.character_book?.entries || [])
   );
   const [avatarB64, setAvatarB64] = useState<string | null>(null);
 
@@ -48,31 +50,14 @@ export function CharacterEditor({ card, isNew, onClose }: Props) {
     showToast("success", t("char.emotionSaved", { key: emotionKey }));
   };
 
-  /** 行格式"key1,key2:内容"解析为内嵌世界书条目 */
-  const parseLore = (): LoreEntry[] => {
-    const entries: LoreEntry[] = [];
-    for (const line of loreText.split("\n")) {
-      const idx = line.indexOf(":");
-      if (idx <= 0) continue;
-      const keys = line
-        .slice(0, idx)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const content = line.slice(idx + 1).trim();
-      if (keys.length > 0 && content)
-        entries.push({ keys, content, insertion_order: entries.length, enabled: true });
-    }
-    return entries;
-  };
-
   const save = async () => {
-    const lore = parseLore();
     // isNew 时沿用 emptyCard 的 id,保证头像路径与卡 id 一致
     const finalCard: CharacterCard = {
       ...form,
       name: form.name.trim() || "Unnamed",
-      character_book: lore.length > 0 ? { name: `${form.name} 世界观`, entries: lore } : undefined,
+      // 只合并用户实际编辑的字段;原 book 的 name/scan_depth/token_budget 与条目
+      // 高级字段(selective/constant/keyssecondary/...)全部保留(T-022)
+      character_book: mergeLoreBook(form.character_book, loreText, `${form.name} 世界观`),
     };
     if (avatarB64) {
       const appDir = await getAppDir();

@@ -16,11 +16,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({
   streamChat: vi.fn(),
   logDiag: vi.fn(),
+  cancelChat: vi.fn(),
 }));
 
 vi.mock("./tauri", () => mocks);
 
-import { runSummarize, SUMMARIZE_THRESHOLD } from "./summarize";
+import { runSummarize, SUMMARIZE_THRESHOLD, SUMMARIZE_TIMEOUT_MS } from "./summarize";
 
 const model = {
   name: "m1",
@@ -41,6 +42,7 @@ describe("runSummarize", () => {
   beforeEach(() => {
     mocks.streamChat.mockReset();
     mocks.logDiag.mockReset();
+    mocks.cancelChat.mockReset();
   });
 
   it("流正常完成 → complete=true，摘要 trim 后返回", async () => {
@@ -160,5 +162,101 @@ describe("runSummarize", () => {
 
   it("阈值只在 summarize.ts 定义，值为 15", () => {
     expect(SUMMARIZE_THRESHOLD).toBe(15);
+  });
+});
+
+// ── T-117:done 事件丢失时的前端兜底超时 ─────────────────────────────
+describe("runSummarize 前端超时（T-117）", () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset();
+    mocks.logDiag.mockReset();
+    mocks.cancelChat.mockReset();
+  });
+
+  it("done 永不到达 → 超时后 complete=false、取消后端流、写诊断日志", async () => {
+    vi.useFakeTimers();
+    try {
+      // 事件监听已注册但流永不结束（模拟 done 事件丢失）
+      mocks.streamChat.mockImplementation(() => new Promise<void>(() => {}));
+
+      const pending = runSummarize({
+        model,
+        systemPrompt: "sys",
+        userContent: "transcript",
+        label: "work-compress",
+        timeoutMs: 1000,
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await pending;
+
+      expect(result).toEqual({ summary: "", complete: false });
+      expect(mocks.cancelChat).toHaveBeenCalledTimes(1);
+      expect(String(mocks.logDiag.mock.calls[0]?.[0])).toContain("timeout");
+      expect(String(mocks.logDiag.mock.calls[0]?.[0])).toContain("work-compress");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("超时后迟到的 onDone 不得把 complete 翻回 true", async () => {
+    vi.useFakeTimers();
+    try {
+      let handlers: Handlers | undefined;
+      mocks.streamChat.mockImplementation(
+        (_req: unknown, _rid: string, h: Handlers): Promise<void> => {
+          handlers = h;
+          return new Promise<void>(() => {});
+        }
+      );
+      const pending = runSummarize({
+        model,
+        systemPrompt: "sys",
+        userContent: "transcript",
+        timeoutMs: 500,
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      handlers?.onToken("迟到内容");
+      handlers?.onDone();
+      const result = await pending;
+      expect(result).toEqual({ summary: "", complete: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("超时后重试成功（状态已清理，可再次压缩）", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.streamChat.mockImplementationOnce(() => new Promise<void>(() => {}));
+      const first = runSummarize({
+        model,
+        systemPrompt: "sys",
+        userContent: "a",
+        timeoutMs: 100,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await first).complete).toBe(false);
+
+      mocks.streamChat.mockImplementationOnce(
+        (_req: unknown, _rid: string, h: Handlers): Promise<void> => {
+          h.onToken("重试成功");
+          h.onDone();
+          return Promise.resolve();
+        }
+      );
+      const second = await runSummarize({
+        model,
+        systemPrompt: "sys",
+        userContent: "b",
+        timeoutMs: 100,
+      });
+      expect(second).toEqual({ summary: "重试成功", complete: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("默认超时常量存在（180s）", () => {
+    expect(SUMMARIZE_TIMEOUT_MS).toBe(180_000);
   });
 });

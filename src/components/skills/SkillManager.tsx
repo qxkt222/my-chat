@@ -29,6 +29,28 @@ function parseJsonArray(raw: string | undefined): unknown[] {
   }
 }
 
+/** 取出数组里的字符串元素；非字符串项直接丢弃（渲染期只认 string）。 */
+function parseStringArray(raw: string | undefined): string[] {
+  return parseJsonArray(raw).filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * 字段非空但不是「字符串数组」：坏 JSON / 合法但非数组 / 数组里混了非字符串。
+ * 这类数据只能降级成空列表，但必须让用户知道「保存会覆盖原值」。
+ */
+function isCorruptJsonArray(raw: string | undefined): boolean {
+  const text = (raw ?? "").trim();
+  if (!text) return false;
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!Array.isArray(v)) return true;
+    const arr: unknown[] = v;
+    return arr.some((item) => typeof item !== "string");
+  } catch {
+    return true;
+  }
+}
+
 export function SkillManager() {
   const t = useT();
   const skills = useSkillStore((s) => s.skills);
@@ -38,6 +60,8 @@ export function SkillManager() {
   const memory = useMemoryStore();
   const [search, setSearch] = useState("");
   const [edit, setEdit] = useState<EditState | null>(null);
+  // 打开编辑时发现的坏 JSON 字段提示（降级为空列表，避免渲染期崩溃）
+  const [editWarning, setEditWarning] = useState<string | null>(null);
   // Escape 关闭技能编辑弹层(此前只有底部取消按钮)
   useEscapeClose(edit ? () => setEdit(null) : undefined);
   // MCP 工具树：服务器名 → 工具名列表
@@ -91,6 +115,7 @@ export function SkillManager() {
 
   const openEdit = (skill?: Skill) => {
     if (!skill) {
+      setEditWarning(null);
       setEdit({
         name: "",
         description: "",
@@ -105,10 +130,22 @@ export function SkillManager() {
       });
       return;
     }
+    // 裸 JSON.parse 会在「合法 JSON 但不是数组」时把对象塞进 EditState，
+    // 随后渲染期 `edit.tools.includes` 直接抛错，整块技能界面白屏。
+    // 统一走 parseStringArray 降级成 []，坏字段在弹层里明确提示。
+    const corrupt = [
+      isCorruptJsonArray(skill.tools_json) ? "tools_json" : null,
+      isCorruptJsonArray(skill.memory_tags) ? "memory_tags" : null,
+    ].filter((f): f is string => f !== null);
+    setEditWarning(
+      corrupt.length > 0
+        ? `技能数据异常（${corrupt.join(" / ")}）：已按空列表载入，保存会以空列表覆盖原值。`
+        : null
+    );
     setEdit({
       ...skill,
-      tools: JSON.parse(skill.tools_json || "[]"),
-      memoryTags: JSON.parse(skill.memory_tags || "[]"),
+      tools: parseStringArray(skill.tools_json),
+      memoryTags: parseStringArray(skill.memory_tags),
     });
   };
 
@@ -187,6 +224,11 @@ export function SkillManager() {
             <h3 className="text-sm font-semibold">
               {edit.id ? t("skills.edit") : t("skills.new")}
             </h3>
+            {editWarning && (
+              <p className="text-[10px] text-destructive bg-destructive/10 border border-destructive/30 rounded px-2 py-1">
+                {editWarning}
+              </p>
+            )}
             <div className="flex gap-2">
               <input
                 placeholder={t("skills.name")}

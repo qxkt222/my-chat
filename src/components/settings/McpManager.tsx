@@ -316,12 +316,12 @@ export function McpManager() {
             <span className="text-[10px] text-muted-foreground truncate max-w-[200px]">
               {s.command}
             </span>
+            {/* T-100:env 值可能是 token/密码,绝不能进 DOM(悬停/检查元素即可读)。
+                只显示 key 名,值一律不渲染。 */}
             {Object.keys(s.env || {}).length > 0 && (
               <span
                 className="text-[10px] text-muted-foreground shrink-0"
-                title={Object.entries(s.env || {})
-                  .map(([k, v]) => `${k}=${v}`)
-                  .join("\n")}
+                title={Object.keys(s.env || {}).join(", ")}
               >
                 ⚙ {Object.keys(s.env || {}).length} env
               </span>
@@ -384,8 +384,19 @@ export function McpManager() {
               </div>
               {toolUi[`${s.id}:${tool.name}`] ? (
                 <div className="mt-1 border border-border rounded overflow-hidden">
+                  {/*
+                    ui_html 来自 MCP 服务器，是不可信内容。
+                    不能同时开 allow-scripts + allow-same-origin：srcdoc 文档会
+                    继承宿主源，sandbox 等同于不存在；而 dev CSP 含 unsafe-inline，
+                    内联脚本可直接调 window.__TAURI__ 的 IPC（T-008）。
+                    只保留 allow-scripts：富 UI 的交互脚本照常运行，但文档获得
+                    不透明源（opaque origin），同源 fetch/XHR/cookie/localStorage
+                    与 Tauri IPC 均不可达。代价是依赖同源请求的 UI 无法直接取数；
+                    若将来确需与宿主通信，应走 postMessage 白名单，而不是恢复
+                    allow-same-origin。
+                  */}
                   <iframe
-                    sandbox="allow-scripts allow-same-origin"
+                    sandbox="allow-scripts"
                     srcDoc={toolUi[`${s.id}:${tool.name}`] || undefined}
                     className="w-full h-64 bg-background"
                     title={`${tool.name} ui`}

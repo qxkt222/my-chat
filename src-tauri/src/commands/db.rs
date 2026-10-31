@@ -189,6 +189,15 @@ pub fn batch_add_messages(
     title: String,
     updated_at: String,
 ) -> Result<(), String> {
+    // T-065：消息键由参数 conv_id 构造，标题/时间也更新参数会话。若消息自带的
+    // conv_id 与参数不一致，旧实现会把消息写进别的会话、标题却更新这里 ——
+    // 入口直接拒绝整批，不做任何静默改道。
+    if let Some(bad) = msgs.iter().find(|m| m.conv_id != conv_id) {
+        return Err(format!(
+            "批量写入的消息「{}」conv_id「{}」与参数「{conv_id}」不一致，已拒绝整批写入",
+            bad.id, bad.conv_id
+        ));
+    }
     let list: Vec<db::conversations::Message> = msgs
         .into_iter()
         .map(|msg| db::conversations::Message {
@@ -257,13 +266,112 @@ pub fn set_msg_bookmark(id: String, conv_id: String, bookmarked: bool) -> Result
     db::conversations::set_msg_bookmark(&id, &conv_id, bookmarked)
 }
 
-/// 批量删除会话:一次 IPC 删除多个会话及其消息(替代 N 次 `delete_conv` 往返)
-#[tauri::command]
-pub fn batch_delete_convs(ids: Vec<String>) -> Result<(), String> {
+/// 批量删除中单个 id 的失败明细（T-066）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchDeleteFailure {
+    pub id: String,
+    pub error: String,
+}
+
+/// 批量删除结果：前端据此知道「哪些真删了、哪些没删、为什么」。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct BatchDeleteResult {
+    pub deleted: Vec<String>,
+    pub failed: Vec<BatchDeleteFailure>,
+}
+
+/// [`batch_delete_convs`] 的可测核心：逐个删除，失败不再中断整批。
+fn batch_delete_with<F>(ids: &[String], mut delete: F) -> BatchDeleteResult
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
+    let mut result = BatchDeleteResult::default();
     for id in ids {
-        db::conversations::delete_conv(&id)?;
+        match delete(id) {
+            Ok(()) => result.deleted.push(id.clone()),
+            Err(error) => result.failed.push(BatchDeleteFailure {
+                id: id.clone(),
+                error,
+            }),
+        }
     }
-    Ok(())
+    result
+}
+
+/// 批量删除会话:一次 IPC 删除多个会话及其消息(替代 N 次 `delete_conv` 往返)。
+///
+/// T-066：旧实现 `for ... ?` 在第二个 id 失败时返回 Err —— 前面的已经删了，
+/// 后面的没删，前端却只拿到一个错误、不知道删了哪些。现在逐项收集结果。
+#[tauri::command]
+pub fn batch_delete_convs(ids: Vec<String>) -> BatchDeleteResult {
+    batch_delete_with(&ids, db::conversations::delete_conv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(id: &str, conv_id: &str) -> MsgDto {
+        MsgDto {
+            id: id.to_string(),
+            conv_id: conv_id.to_string(),
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            token_count: 1,
+            model: String::new(),
+            reasoning: String::new(),
+            seq: 0,
+            error: String::new(),
+            error_kind: String::new(),
+            bookmarked: false,
+        }
+    }
+
+    /// T-065：命令入口在碰 DB 之前就拒绝 `conv_id` 不一致的批次。
+    #[test]
+    fn batch_add_rejects_foreign_conv_id_before_db() {
+        let err = batch_add_messages(
+            "conv1".to_string(),
+            vec![msg("m1", "conv1"), msg("m2", "other")],
+            "t".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        )
+        .expect_err("消息 conv_id 与参数不一致必须拒绝");
+        assert!(err.contains("conv_id"), "{err}");
+        assert!(err.contains("other"), "错误应指出是哪条消息: {err}");
+    }
+
+    /// T-066：第二个 id 失败时不中断整批，返回已删/未删清单。
+    #[test]
+    fn batch_delete_reports_per_id_results() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = batch_delete_with(&ids, |id| {
+            if id == "b" {
+                Err("注入的删除失败".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(
+            result.deleted,
+            vec!["a".to_string(), "c".to_string()],
+            "失败项之后仍要继续删"
+        );
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].id, "b");
+        assert!(result.failed[0].error.contains("注入"));
+    }
+
+    /// 全部成功：deleted 完整、failed 为空。
+    #[test]
+    fn batch_delete_all_success() {
+        let ids = vec!["x".to_string(), "y".to_string()];
+        let result = batch_delete_with(&ids, |_| Ok(()));
+        assert_eq!(result.deleted, ids);
+        assert!(result.failed.is_empty());
+    }
 }
 
 #[tauri::command]
@@ -286,6 +394,15 @@ pub struct ModelDto {
     pub api_key_encrypted: String,
     pub model: String,
     pub params_json: String,
+    /// T-040：`list_models_decrypted` 解不开密文时置 true。前端据此知道
+    /// 「密文仍在、本次拿不到明文」，不得把空 key 当作真实值处理。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub api_key_locked: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde(skip_serializing_if) 要求 &bool
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[tauri::command]
@@ -297,6 +414,7 @@ pub fn save_model(model: ModelDto) -> Result<(), String> {
         api_key_encrypted: model.api_key_encrypted,
         model: model.model,
         params_json: model.params_json,
+        api_key_locked: model.api_key_locked,
     })
 }
 
@@ -311,6 +429,7 @@ pub fn list_models() -> Result<Vec<ModelDto>, String> {
                 api_key_encrypted: m.api_key_encrypted,
                 model: m.model,
                 params_json: m.params_json,
+                api_key_locked: m.api_key_locked,
             })
             .collect()
     })
@@ -327,6 +446,7 @@ pub fn list_models_decrypted() -> Result<Vec<ModelDto>, String> {
                 api_key_encrypted: m.api_key_encrypted,
                 model: m.model,
                 params_json: m.params_json,
+                api_key_locked: m.api_key_locked,
             })
             .collect()
     })

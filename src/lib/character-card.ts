@@ -6,7 +6,7 @@
 //    无魔数时回退扫描 PNG tEXt 块(keyword="chara")。
 //  - character_book:酒馆部分卡用单数 key 字段,统一规整为 keys 数组。
 
-import type { CharacterCard, LoreEntry } from "@/types";
+import type { CharacterBook, CharacterCard, LoreEntry } from "@/types";
 
 const MAGIC_V2 = "chara_card_v2";
 const MAGIC_V3 = "chara_card_v3";
@@ -34,14 +34,34 @@ function emptyCard(): Omit<CharacterCard, "id" | "created_at" | "updated_at"> {
   };
 }
 
+/**
+ * 次级关键词别名归一:
+ *  - 酒馆 V2 character_book 规范字段是 `secondary_keys`(数组);
+ *  - 部分世界书/旧导出用 `keysecondary`(本仓旧版导出还写成过逗号分隔字符串)。
+ * 内部字段始终是 `keyssecondary`(已落盘数据无需迁移)。
+ */
+export function normalizeSecondaryKeys(e: Record<string, unknown>): string[] | undefined {
+  const raw = e.keyssecondary ?? e.secondary_keys ?? e.keysecondary;
+  if (Array.isArray(raw)) {
+    const keys = raw.map(String).filter(Boolean);
+    return keys.length > 0 ? keys : undefined;
+  }
+  if (typeof raw === "string") {
+    const keys = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return keys.length > 0 ? keys : undefined;
+  }
+  return undefined;
+}
+
 /** 归一化 character_book:entry.key(单数,部分旧卡)→ keys 数组;补全高级字段映射 */
 function normalizeLoreEntry(e: Record<string, unknown>): LoreEntry {
   const keysRaw = (e.keys as unknown[] | undefined) ?? (e.key ? [e.key] : []);
   return {
     keys: (Array.isArray(keysRaw) ? keysRaw : []).map(String),
-    keyssecondary: Array.isArray(e.keyssecondary)
-      ? (e.keyssecondary as unknown[]).map(String)
-      : undefined,
+    keyssecondary: normalizeSecondaryKeys(e),
     content: String(e.content ?? ""),
     constant: e.constant === true,
     selective: e.selective === true,
@@ -56,6 +76,126 @@ function normalizeLoreEntry(e: Record<string, unknown>): LoreEntry {
     regex: e.regex === true ? true : undefined,
     match_whole_words: e.match_whole_words === true ? true : undefined,
     min_activations: typeof e.min_activations === "number" ? e.min_activations : undefined,
+    // T-121:定时世界书字段导出/再导入时必须往返保住
+    sticky: e.sticky === true ? true : undefined,
+    cooldown: typeof e.cooldown === "number" ? e.cooldown : undefined,
+  };
+}
+
+/**
+ * T-118:判断根对象是否是**独立世界书**而非角色卡。
+ * 独立世界书形如 `{ name?, scan_depth?, entries: [...] }`(或 entries 字典),
+ * 根上没有 description/personality/scenario/first_mes 等角色字段。
+ * 旧实现会让它落进 V1 分支 → 生成一张空名角色卡并落盘。
+ */
+function looksLikeLorebookObject(obj: Record<string, unknown>): boolean {
+  const entries = obj.entries;
+  const hasEntries = Array.isArray(entries) || (!!entries && typeof entries === "object");
+  if (!hasEntries) return false;
+  const rpFields = ["description", "personality", "scenario", "first_mes", "mes_example"];
+  return !rpFields.some((k) => typeof obj[k] === "string" && (obj[k] as string).trim() !== "");
+}
+
+/** 行格式转义:内容里的反斜杠与换行转成 \\ / \n,保证一条条目只占一行 */
+function escapeLoreContent(content: string): string {
+  return content.replace(/\\/g, "\\\\").replace(/\r\n?/g, "\n").replace(/\n/g, "\\n");
+}
+
+/** escapeLoreContent 的逆操作 */
+function unescapeLoreContent(content: string): string {
+  let out = "";
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    if (ch === "\\") {
+      const next = content[i + 1];
+      if (next === "\\") {
+        out += "\\";
+        i++;
+        continue;
+      }
+      if (next === "n") {
+        out += "\n";
+        i++;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * 编辑器显示用行格式:`关键词1,关键词2:内容`,每条条目一行。
+ * 内容中的换行被转义,避免多行内容在 textarea 里被当成多条(旧实现会因此拆行截断)。
+ */
+export function loreEntriesToText(entries: LoreEntry[]): string {
+  return entries.map((e) => `${e.keys.join(",")}:${escapeLoreContent(e.content)}`).join("\n");
+}
+
+/** 解析一行「关键词:内容」;非法/空行返回 null */
+function parseLoreLine(line: string): { keys: string[]; content: string } | null {
+  const idx = line.indexOf(":");
+  if (idx <= 0) return null;
+  const keys = line
+    .slice(0, idx)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const content = unescapeLoreContent(line.slice(idx + 1)).trim();
+  if (keys.length === 0 || !content) return null;
+  return { keys, content };
+}
+
+/**
+ * 按索引把编辑器的行格式文本合并回原条目:
+ *  - 未改动的行 → 直接复用**原条目对象**(constant/selective/keyssecondary/position/
+ *    probability/regex/... 全部保留,含换行的 content 也原样保留);
+ *  - 改动过的行 → 只在原条目上覆盖显示层可编辑的 keys/content;
+ *  - 超出原条目数量的行 → 追加为新条目。
+ */
+export function mergeLoreEntries(original: LoreEntry[], text: string): LoreEntry[] {
+  const lines = text.split(/\r?\n/);
+  const originalLines = original.map((e) => `${e.keys.join(",")}:${escapeLoreContent(e.content)}`);
+  const merged: LoreEntry[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (!line.trim()) continue;
+    const base = original[i];
+    if (base && line === originalLines[i]) {
+      merged.push(base);
+      continue;
+    }
+    const parsed = parseLoreLine(line);
+    if (!parsed) continue; // 残缺行(没有可触发关键词/内容)→ 丢弃
+    if (base) {
+      merged.push({ ...base, keys: parsed.keys, content: parsed.content });
+    } else {
+      merged.push({
+        keys: parsed.keys,
+        content: parsed.content,
+        insertion_order: merged.length,
+        enabled: true,
+      });
+    }
+  }
+  return merged;
+}
+
+/**
+ * 保存内嵌世界书:保留原 book 的 name/description/scan_depth/token_budget,
+ * 只合并条目;原卡无 book 且用户新增条目时按旧默认名创建。
+ */
+export function mergeLoreBook(
+  original: CharacterBook | undefined,
+  text: string,
+  fallbackName: string
+): CharacterBook | undefined {
+  const entries = mergeLoreEntries(original?.entries ?? [], text);
+  if (entries.length === 0) return undefined;
+  return {
+    ...(original ?? {}),
+    name: original?.name ?? fallbackName,
+    entries,
   };
 }
 
@@ -133,7 +273,13 @@ export function parseCharacterJson(
       card.specVersion = obj.spec === MAGIC_V3 ? "3" : "2";
       return card;
     }
-    // V1 扁平(或带 spec 但无 data 的容错)
+    // T-118:独立世界书(根级 entries)不是角色卡 —— 明确拒绝,而不是造空卡。
+    if (looksLikeLorebookObject(obj)) return null;
+    // V1 扁平(或带 spec 但无 data 的容错):至少要有 name 或 description,
+    // 否则任意 JSON 对象(设置、配置、世界书片段…)都会被当成空白角色卡导入。
+    const v1Name = typeof obj.name === "string" ? obj.name.trim() : "";
+    const v1Description = typeof obj.description === "string" ? obj.description.trim() : "";
+    if (!v1Name && !v1Description) return null;
     const card = cardFromData(obj);
     card.specVersion = obj.spec ? String(obj.spec) : "";
     return card;
@@ -143,51 +289,61 @@ export function parseCharacterJson(
 }
 
 /**
+ * base64 → bytes（T-119 性能）。
+ * `Uint8Array.from(atob(s), c => c.charCodeAt(0))` 对 5MB 实测约 880ms
+ * （每个字符一次回调）；纯 for 循环约 22ms，差 40 倍。
+ */
+export function base64ToBytes(base64: string): Uint8Array {
+  const bin = atob(base64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
  * 从 PNG 二进制(base64)解析角色卡:
  * 返回 { json, avatarBase64 } —— avatarBase64 为魔数前的原始 PNG(可作头像),
- * 无魔数时回退扫 tEXt 块(keyword="chara"),此时无头像。
+ * 无魔数时回退扫 tEXt 块(keyword="chara"),此时以整张图作头像。
  *
  * 兼容真实世界卡(酒馆/Chub 等导出):
  *  - **多段卡**:现代卡同时嵌 chara_card_v2 段 + chara_card_v3 段(V2 前 V3 后)。
  *    逐段尝试解析,取第一个合法 JSON 段(通常取到 V3 段)。
  *  - **JSON 内部自带 "spec":"chara_card_v2" 字符串**会误命中魔数——
- *    用「紧邻 PNG IEND 尾标」判定真魔数作为头像边界,JSON 段逐个试错跳过误命中。
+ *    以 IEND 块之后的偏移为头像边界,尾串内逐候选试错跳过误命中。
  */
 export function parseCharacterPng(
   base64: string
 ): { json: string; avatarBase64: string | null } | null {
   try {
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-    const v2Bytes = new TextEncoder().encode(MAGIC_V2);
-    const v3Bytes = new TextEncoder().encode(MAGIC_V3);
-    const hits = findAllMagic(bytes, v2Bytes, v3Bytes);
+    const bytes = base64ToBytes(base64);
 
-    if (hits.length > 0) {
-      // 头像边界 = 第一个「前面紧邻 PNG IEND 尾标」的魔数(真魔数,在 PNG 数据后);
-      // JSON 内部的 spec 串误命中前面是 "spec":" 而非 IEND,不会被当作边界。
-      const iendTail = new Uint8Array([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+    // ── T-119:按 PNG 块结构定位 IEND,而不是全文扫魔数 ─────────────
+    // 现代酒馆卡的魔数紧跟在 IEND(含 CRC)之后。直接走块头跳到 IEND
+    // 是 O(块数) 的偏移计算,图像数据一个字节都不用解码/复制;
+    // 旧实现对每个魔数命中都 `slice(余下全部字节)` + decode + parse,
+    // 5MB/200 命中 ≈ 3.3s、50MB 可冻结 webview。
+    const pngEnd = findPngEnd(bytes);
+    if (pngEnd >= 0) {
+      const tail = decodeBytesFrom(bytes, pngEnd);
+      const json = tryParseCardTail(tail);
+      if (json) return { json, avatarBase64: avatarBefore(base64, bytes, pngEnd) };
+      // T-120:尾部有魔数但所有分段都解析失败时**不能直接 return null** ——
+      // 继续走下面的 tEXt 回退(裸 JSON 的 V2/V3 卡常只存在 tEXt 里)。
+      if (tail.includes(MAGIC_V2) || tail.includes(MAGIC_V3)) {
+        console.warn("[character-card] PNG 尾部魔数段解析失败，尝试 tEXt 回退");
+      }
+    } else {
+      // 非标准 PNG(或没有合法块结构):保留全文扫描兜底,但**限制候选数**,
+      // 且只 decode 一次,不再对每个命中复制剩余字节。
+      const v2Bytes = new TextEncoder().encode(MAGIC_V2);
+      const v3Bytes = new TextEncoder().encode(MAGIC_V3);
+      const hits = findAllMagic(bytes, v2Bytes, v3Bytes, MAX_MAGIC_HITS);
       const firstHit = hits[0];
-      let boundary = firstHit ? firstHit.pos : -1;
-      for (const h of hits) {
-        if (h.pos >= 8 && bytesEqual(bytes.slice(h.pos - 8, h.pos), iendTail)) {
-          boundary = h.pos;
-          break;
-        }
+      if (firstHit) {
+        const tail = decodeBytesFrom(bytes, firstHit.pos);
+        const json = tryParseCardTail(tail);
+        if (json) return { json, avatarBase64: avatarBefore(base64, bytes, firstHit.pos) };
       }
-      // 逐段尝试:魔数之后到文件尾,能解析成合法卡的段即真卡。
-      // 多段卡:V2 段后含 V3 魔数+JSON 是混合串(解析失败),V3 段后是纯 JSON(成功)。
-      for (const h of hits) {
-        const seg = bytes.slice(h.pos + h.len);
-        let end = seg.length;
-        while (end > 0 && (seg[end - 1] === 0x0a || seg[end - 1] === 0x0d || seg[end - 1] === 0x20))
-          end--;
-        const json = new TextDecoder().decode(seg.slice(0, end)).trim();
-        if (json && parseCharacterJson(json)) {
-          const avatar = bytes.slice(0, boundary);
-          return { json, avatarBase64: avatar.length > 8 ? base64FromBytes(avatar) : null };
-        }
-      }
-      return null;
     }
 
     // 2) 回退:tEXt 块 keyword="chara"(老式卡,JSON 常 base64 编码存于此;
@@ -207,6 +363,104 @@ export function parseCharacterPng(
   }
 }
 
+/** 非标准文件全文扫描时的魔数候选上限(T-119:防止每个命中都尝试解析) */
+const MAX_MAGIC_HITS = 64;
+/** 同一尾串里最多尝试解析的魔数候选数(多段卡 + JSON 内部 spec 误命中足够) */
+const MAX_TAIL_PARSE_ATTEMPTS = 8;
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** 校验 PNG 签名并沿块头走到 IEND,返回 IEND 之后(含 CRC)的偏移;非法返回 -1 */
+function findPngEnd(bytes: Uint8Array): number {
+  if (bytes.length < 8) return -1;
+  for (let i = 0; i < PNG_SIGNATURE.length; i++) {
+    if (bytes[i] !== PNG_SIGNATURE[i]) return -1;
+  }
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const len = readU32(bytes, offset);
+    const dataEnd = offset + 8 + len;
+    // 长度越界 = 坏块结构(不信任文件头);交给全文扫描兜底
+    if (dataEnd + 4 > bytes.length) return -1;
+    if (chunkTypeEquals(bytes, offset + 4, "IEND")) return dataEnd + 4;
+    offset = dataEnd + 4;
+  }
+  return -1;
+}
+
+function chunkTypeEquals(bytes: Uint8Array, offset: number, type: string): boolean {
+  if (offset + 4 > bytes.length) return false;
+  for (let i = 0; i < 4; i++) {
+    if (bytes[offset + i] !== type.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+/** 从 offset 到文件尾解码一次(只复制一次,不再逐命中复制) */
+function decodeBytesFrom(bytes: Uint8Array, offset: number): string {
+  return new TextDecoder().decode(bytes.subarray(offset));
+}
+
+/**
+ * 在尾部文本中按出现顺序尝试魔数后的 JSON,直到解析出合法角色卡。
+ * 多段卡(V2 魔数+JSON+V3 魔数+JSON)与 JSON 内部 "spec":"chara_card_v2"
+ * 误命中都靠「逐个候选试错」排除。
+ */
+function tryParseCardTail(tail: string): string | null {
+  let from = 0;
+  for (let attempt = 0; attempt < MAX_TAIL_PARSE_ATTEMPTS; attempt++) {
+    const a = tail.indexOf(MAGIC_V2, from);
+    const b = tail.indexOf(MAGIC_V3, from);
+    let pos = -1;
+    let len = 0;
+    if (a >= 0 && (b < 0 || a < b)) {
+      pos = a;
+      len = MAGIC_V2.length;
+    } else if (b >= 0) {
+      pos = b;
+      len = MAGIC_V3.length;
+    }
+    if (pos < 0) return null;
+    const json = tail.slice(pos + len).trim();
+    if (json && parseCharacterJson(json)) return json;
+    from = pos + len;
+  }
+  return null;
+}
+
+const B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * 魔数之前的原始图像区作头像;不足一个 PNG 签名时视为无头像。
+ *
+ * 性能(同属 T-119):头像就是输入 base64 的前 `boundary` 字节,直接对原
+ * base64 串做前缀切片(按 3 字节 / 4 字符对齐,末尾 1-2 字节单独编码)
+ * 即可,不必把 5MB 字节重新编码(实测重编码约 400-800ms)。含空白字符的
+ * 非标准 base64 才回退到完整重编码,保证正确性。
+ */
+function avatarBefore(base64: string, bytes: Uint8Array, boundary: number): string | null {
+  if (boundary <= 8) return null;
+  if (/\s/.test(base64)) return base64FromBytes(bytes.subarray(0, boundary));
+  const full = Math.floor(boundary / 3) * 3;
+  const chars = (full / 3) * 4;
+  // 理论上 chars ≤ base64.length;防御坏输入
+  if (chars > base64.length) return base64FromBytes(bytes.subarray(0, boundary));
+  let out = base64.slice(0, chars);
+  const rem = boundary - full;
+  if (rem === 0) return out;
+  const a = bytes[full] ?? 0;
+  const b = bytes[full + 1] ?? 0;
+  out += B64_ALPHABET[a >> 2];
+  if (rem === 1) {
+    // 只剩 1 字节:第 2 个字符后直接补 "=="
+    out += `${B64_ALPHABET[(a & 3) << 4]}==`;
+  } else {
+    out += B64_ALPHABET[((a & 3) << 4) | (b >> 4)];
+    out += `${B64_ALPHABET[(b & 15) << 2]}=`;
+  }
+  return out;
+}
+
 /**
  * tEXt 块内容兼容两种存法:直接 JSON / base64 编码的 JSON(老式酒馆卡常见)。
  * 返回能解析的原始 JSON 字符串,否则 null。
@@ -221,7 +475,7 @@ function tryDecodeJson(text: string): string | null {
     /* 非直接 JSON */
   }
   try {
-    const bytes = Uint8Array.from(atob(trimmed), (c) => c.charCodeAt(0));
+    const bytes = base64ToBytes(trimmed);
     const decoded = new TextDecoder().decode(bytes);
     JSON.parse(decoded);
     return decoded;
@@ -230,49 +484,43 @@ function tryDecodeJson(text: string): string | null {
   }
 }
 
-/** 收集全部魔数命中位置(升序),含 JSON 内部的误命中(靠试错排除) */
+/**
+ * 收集魔数命中位置(升序,最多 limit 个),含 JSON 内部的误命中(靠试错排除)。
+ * T-119:limit 防止病态文件(图像数据里塞满 ASCII 魔数)产生海量候选;
+ * 只记偏移,不复制字节。
+ */
 function findAllMagic(
   bytes: Uint8Array,
   v2: Uint8Array,
-  v3: Uint8Array
+  v3: Uint8Array,
+  limit: number
 ): { pos: number; len: number }[] {
   const out: { pos: number; len: number }[] = [];
-  let from = 0;
-  while (from < bytes.length) {
-    const a = findBytesFrom(bytes, v2, from);
-    const b = findBytesFrom(bytes, v3, from);
-    let pos = -1;
-    let len = 0;
-    if (a >= 0 && (b < 0 || a < b)) {
-      pos = a;
-      len = v2.length;
-    } else if (b >= 0) {
-      pos = b;
-      len = v3.length;
+  // 单次线性扫描:旧实现每轮分别 find(v2) / find(v3),某个魔数不存在时
+  // 后者会把剩余字节整段重扫一遍 → 命中数 × 文件大小。
+  const maxLen = Math.max(v2.length, v3.length);
+  for (let i = 0; i + 1 < bytes.length && out.length < limit; i++) {
+    if (bytes[i] !== v2[0] && bytes[i] !== v3[0]) continue;
+    if (matchesAt(bytes, i, v2)) {
+      out.push({ pos: i, len: v2.length });
+      i += v2.length - 1;
+    } else if (matchesAt(bytes, i, v3)) {
+      out.push({ pos: i, len: v3.length });
+      i += v3.length - 1;
     }
-    if (pos < 0) break;
-    out.push({ pos, len });
-    from = pos + len;
+    // 保险:i 过于接近尾部时 loops cond 会自然结束
+    if (i + maxLen > bytes.length) break;
   }
   return out;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-/** 在字节数组中从 from 开始查找目标序列,返回位置(找不到 -1) */
-function findBytesFrom(haystack: Uint8Array, needle: Uint8Array, from: number): number {
-  if (needle.length === 0 || haystack.length < needle.length) return -1;
-  outer: for (let i = Math.max(0, from); i <= haystack.length - needle.length; i++) {
-    for (let j = 0; j < needle.length; j++) {
-      if (haystack[i + j] !== needle[j]) continue outer;
-    }
-    return i;
+/** bytes[offset..] 是否以 needle 开头(逐字节比较,不复制) */
+function matchesAt(bytes: Uint8Array, offset: number, needle: Uint8Array): boolean {
+  if (offset + needle.length > bytes.length) return false;
+  for (let j = 0; j < needle.length; j++) {
+    if (bytes[offset + j] !== needle[j]) return false;
   }
-  return -1;
+  return true;
 }
 
 /** 从 PNG 字节中提取所有指定 keyword 的 tEXt 块文本(可能多块) */
@@ -373,7 +621,8 @@ export function toExportJson(
         id: i + 1,
         keys: e.keys,
         key: e.keys[0] || "",
-        keysecondary: e.keyssecondary || "",
+        // 酒馆 V2 规范字段是 secondary_keys(数组);内部仍叫 keyssecondary
+        secondary_keys: e.keyssecondary || [],
         comment: e.comment || "",
         content: e.content,
         constant: !!e.constant,
@@ -381,6 +630,15 @@ export function toExportJson(
         insertion_order: e.insertion_order ?? 0,
         enabled: e.enabled !== false,
         position: e.position || "before_char",
+        // 导入时特意保留的高级字段:导出必须反向映射,否则往返即丢(见 T-030)
+        case_sensitive: e.case_sensitive,
+        probability: e.probability,
+        recursive: e.recursive,
+        regex: e.regex,
+        match_whole_words: e.match_whole_words,
+        min_activations: e.min_activations,
+        sticky: e.sticky,
+        cooldown: e.cooldown,
         extensions: {},
       })),
     };
@@ -390,7 +648,7 @@ export function toExportJson(
 
 /** 组装导出用 PNG(头像原图 + 魔数 + JSON);无头像时返回 null(应导出 JSON) */
 export function buildExportPng(avatarBase64: string, json: string): string {
-  const avatarBytes = Uint8Array.from(atob(avatarBase64), (c) => c.charCodeAt(0));
+  const avatarBytes = base64ToBytes(avatarBase64);
   const magic = new TextEncoder().encode(MAGIC_V2);
   const jsonBytes = new TextEncoder().encode(json);
   const out = new Uint8Array(avatarBytes.length + magic.length + jsonBytes.length);

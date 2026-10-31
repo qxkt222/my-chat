@@ -67,11 +67,12 @@ describe("createLiteAllowStep", () => {
 });
 
 describe("runMcpStep — allowStep 门禁", () => {
-  it("允许时照常列工具并调用", async () => {
+  it("允许时照常列工具并调用，并向 Rust 声明 scope=chat", async () => {
     const res = await runMcpStep(server(), "t1", "", "", () => true);
     expect(res).toBe("called");
     expect(ipc.mcpListTools).toHaveBeenCalledWith("s1");
-    expect(ipc.mcpCallTool).toHaveBeenCalledWith("s1", "t1", {});
+    // Rust 侧还会按 scope 再校验一次白名单（双重校验，T-130）。
+    expect(ipc.mcpCallTool).toHaveBeenCalledWith("s1", "t1", {}, "chat");
   });
 
   it("不允许时返回明确错误，且不发起 MCP IPC", async () => {
@@ -88,10 +89,11 @@ describe("runMcpStep — allowStep 门禁", () => {
     expect(res).toBe("called");
   });
 
-  it("不传 allowStep 时行为不变（向后兼容）", async () => {
+  it("不传 allowStep 时按工作模式放行（scope=work）", async () => {
     const res = await runMcpStep(server(), "t1", "", "");
     expect(res).toBe("called");
     expect(ipc.mcpCallTool).toHaveBeenCalledTimes(1);
+    expect(ipc.mcpCallTool).toHaveBeenCalledWith("s1", "t1", {}, "work");
   });
 });
 
@@ -123,7 +125,7 @@ describe("runMcpChain — allowStep 门禁", () => {
     const allow = createLiteAllowStep([["s1", "t1"]]);
     const res = await runMcpChain("S1 t1 :: t2", () => {}, allow);
     expect(ipc.mcpCallTool).toHaveBeenCalledTimes(1);
-    expect(ipc.mcpCallTool).toHaveBeenCalledWith("s1", "t1", {});
+    expect(ipc.mcpCallTool).toHaveBeenCalledWith("s1", "t1", {}, "chat");
     expect(res).toContain(t("chat.mcpLiteDenied", { s: "S1", t: "t2" }));
   });
 });

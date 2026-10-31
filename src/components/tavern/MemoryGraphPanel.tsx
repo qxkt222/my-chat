@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { X } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import type { GraphNode, RelationGraph } from "@/lib/memory-graph";
 
@@ -43,9 +44,12 @@ function layout(g: RelationGraph): { node: GraphNode; x: number; y: number }[] {
 export function MemoryGraphPanel({
   graph,
   onJump,
+  onClose,
 }: {
   graph: RelationGraph;
   onJump?: (msgId: string) => void;
+  /** 提供时在标题栏右侧渲染关闭按钮（不传则不渲染，保持向后兼容） */
+  onClose?: (() => void) | undefined;
 }) {
   const t = useT();
   const laid = useMemo(() => layout(graph), [graph]);
@@ -58,13 +62,24 @@ export function MemoryGraphPanel({
         <span>
           {graph.nodes.length} 节点 / {graph.edges.length} 关系
         </span>
-        <span className="ml-auto flex gap-2">
+        <span className="ml-auto flex items-center gap-2">
           {(Object.keys(KIND_COLOR) as GraphNode["kind"][]).map((k) => (
             <span key={k} className="flex items-center gap-0.5">
               <span className="w-2 h-2 rounded-full" style={{ background: KIND_COLOR[k] }} />
               {KIND_LABEL[k]}
             </span>
           ))}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t("graph.close")}
+              title={t("graph.close")}
+              className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
         </span>
       </div>
       <svg viewBox="0 0 580 300" className="w-full h-56">

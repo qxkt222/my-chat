@@ -54,10 +54,13 @@ rfd = "0.15"
 pdf-extract = "0.12"
 # docx 解包（word/document.xml 文本提取）
 zip = "2"
+# T-072：非 UTF-8 文本（Windows 记事本 GBK/GB18030）回退解码
+encoding_rs = "0.8"
 tauri-plugin-opener = "2.5.5"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+# Win32_System_Threading：T-061 单实例（命名 mutex + 命名事件），不新增依赖。
+windows-sys = { version = "0.52", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

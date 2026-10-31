@@ -184,10 +184,11 @@ export function collectLorebookTextWithTimed(
   for (const book of books) {
     const scanDepth = book.scan_depth ?? SCAN_DEPTH_DEFAULT;
     const budget = book.token_budget ?? CHAR_BUDGET_DEFAULT;
+    // T-116:scan_depth=0 表示「不扫描历史」。旧写法 slice(-0) 等价 slice(0),
+    // 反而扫描**全部**历史 —— 与 0 深度语义完全相反。<=0 时只扫当前输入。
+    const scopedMessages = scanDepth > 0 ? recentMessages.slice(-scanDepth) : [];
     // 递归激活:扫描文本随轮次累积(内容触发更多关键词)
-    let scanText = [...recentMessages.slice(-scanDepth).map((m) => m.content), currentInput].join(
-      "\n"
-    );
+    let scanText = [...scopedMessages.map((m) => m.content), currentInput].join("\n");
     let roundHits: LoreHit[] = [];
     const matchedContents = new Set<string>(); // 本轮命中(含常驻)的内容,递归源
 
@@ -314,10 +315,26 @@ export function collectLorebookText(
   return collectLorebookTextWithTimed(lorebooks, recentMessages, currentInput, timed).text;
 }
 
+/**
+ * 替换 {{key}} 宏。
+ *
+ * T-115:旧实现按 vars 的固定 key 顺序只扫一遍 —— char/user 排在
+ * description/personality 之前,所以卡片字段里写的 {{char}}/{{user}}
+ * 是在「该宏已经被替换过」之后才插入的,永远保持字面量。
+ * 现在迭代到稳定(字段内容可再引用其它宏),并设上限防止
+ * `description` 自引用之类坏数据无限膨胀。
+ */
+const SWAP_VARS_MAX_PASSES = 5;
+
 function swapVars(text: string, vars: Record<string, string>): string {
   let out = text;
-  for (const [k, v] of Object.entries(vars)) {
-    out = out.split(`{{${k}}}`).join(v);
+  for (let pass = 0; pass < SWAP_VARS_MAX_PASSES; pass++) {
+    let next = out;
+    for (const [k, v] of Object.entries(vars)) {
+      next = next.split(`{{${k}}}`).join(v);
+    }
+    if (next === out) return out;
+    out = next;
   }
   return out;
 }
@@ -409,7 +426,13 @@ export function buildGroupSystemParts(ctx: {
 export function buildGroupSystemPrompt(ctx: Parameters<typeof buildGroupSystemParts>[0]): string {
   const { stableSystem, lorebook, summary } = buildGroupSystemParts(ctx);
   let rp = stableSystem;
-  if (lorebook) rp = `${rp}\n\n【世界观设定】\n${lorebook}`;
+  if (lorebook) {
+    // T-114:collectLorebookTextWithTimed 产出的文本**已经自带**
+    // `【世界书 / 世界观设定】` 标题;群聊这里再包一层会出现双层标题。
+    // 已有头则直接拼,只有无头文本(如外部直接传入)才补标题。
+    const hasHeader = lorebook.startsWith("【世界书") || lorebook.startsWith("【世界观设定】");
+    rp = hasHeader ? `${rp}\n\n${lorebook}` : `${rp}\n\n【世界观设定】\n${lorebook}`;
+  }
   if (summary) rp = `${rp}\n\n【对话摘要】\n${summary}`;
   return rp;
 }

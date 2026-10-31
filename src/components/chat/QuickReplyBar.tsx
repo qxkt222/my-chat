@@ -70,7 +70,9 @@ export function QuickReplyBar({
   return (
     <div className="max-w-3xl mx-auto flex flex-wrap items-center gap-1 pt-1.5 text-[11px]">
       {replies.map((q) => (
-        <span key={q.id} className="relative inline-flex">
+        // group 必须挂在按钮的实际父级上，删除按钮的 group-hover 才有宿主；
+        // 此前根与父级都没有 group，删除入口永远 opacity-0（不可见也不可点）。
+        <span key={q.id} className="relative inline-flex group">
           <button
             onClick={() => fire(q)}
             disabled={disabled}

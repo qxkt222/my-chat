@@ -8,10 +8,6 @@ import { showToast } from "@/components/ui/Toast";
 import { PanelHeader } from "@/components/settings/PanelHeader";
 import type { LoreEntry, Persona } from "@/types";
 
-interface EditEntry extends LoreEntry {
-  key: string;
-}
-
 /** 世界书管理:多本 + 导入酒馆世界书 + Persona 绑定 + 单本条目编辑
  *
  *  2026-09-25 加 onBack 与吸顶头：开发者反馈「导入的多了会把上面那些排序按钮挤掉」，
@@ -21,7 +17,7 @@ export function LorebookManager({ onBack }: { onBack?: (() => void) | undefined 
   const store = useCharacterStore();
   const [activeId, setActiveId] = useState<string>("__main__");
   const [newBookName, setNewBookName] = useState("");
-  const [editing, setEditing] = useState<EditEntry | null>(null);
+  const [editing, setEditing] = useState<LoreEntry | null>(null);
   const [key, setKey] = useState("");
   const [content, setContent] = useState("");
   const [constant, setConstant] = useState(false);
@@ -37,7 +33,6 @@ export function LorebookManager({ onBack }: { onBack?: (() => void) | undefined 
 
   const openNew = () => {
     setEditing({
-      key: "",
       keys: [],
       content: "",
       constant: false,
@@ -54,7 +49,10 @@ export function LorebookManager({ onBack }: { onBack?: (() => void) | undefined 
     setPosition("before_char");
   };
   const openEdit = (e: LoreEntry, i: number) => {
-    setEditing({ ...e, key: e.keys.join(",") });
+    // 保留原对象做字段级合并：编辑只应覆盖表单里的字段，
+    // keyssecondary/comment/match_whole_words/min_activations/selective/
+    // sticky/cooldown 等未暴露到界面的字段必须原样带走。
+    setEditing({ ...e });
     setKey(e.keys.join(","));
     setContent(e.content);
     setConstant(!!e.constant);
@@ -72,12 +70,16 @@ export function LorebookManager({ onBack }: { onBack?: (() => void) | undefined 
       .split(/[,，]/)
       .map((s) => s.trim())
       .filter(Boolean);
+    // 字段级合并：以打开编辑时的原条目为底，只覆盖编辑器里的字段。
+    // 旧实现整对象重建，导入条目丢失 keyssecondary/comment/match_whole_words/
+    // min_activations 等字段，并把禁用条目强制 enabled=true。
     const entry: LoreEntry = {
+      ...editing,
       keys,
       content,
       constant,
       insertion_order: order,
-      enabled: true,
+      enabled: editing.enabled ?? true,
       case_sensitive: caseSensitive,
       probability,
       recursive,

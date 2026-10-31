@@ -21,7 +21,10 @@ pub struct RagQuery {
 pub struct SearchResultDto {
     pub chunk_id: String,
     pub content: String,
+    /// 0..=1 的归一化相关度（T-068）
     pub score: f32,
+    /// 分数来源：bm25 / cosine / rrf —— UI 据此标注可解释性
+    pub score_kind: String,
     pub kb_name: String,
     pub file_name: String,
 }
@@ -73,12 +76,18 @@ pub async fn rag_search(query: RagQuery) -> Result<Vec<SearchResultDto>, String>
     .await
     .map_err(|e| format!("搜索线程错误: {e}"))?;
 
+    let score_kind = match mode {
+        "bm25" => "bm25",
+        "vector" => "cosine",
+        _ => "rrf",
+    };
     Ok(results
         .into_iter()
         .map(|r| SearchResultDto {
             chunk_id: r.chunk_id,
             content: r.content,
             score: r.score,
+            score_kind: score_kind.to_string(),
             kb_name: r.kb_name,
             file_name: r.file_name,
         })
@@ -205,4 +214,14 @@ pub async fn rag_index_with_openai(req: IndexRequest, api_key: String) -> Result
 #[tauri::command]
 pub fn delete_kb(id: String) -> Result<(), String> {
     crate::db::knowledge::delete_kb(&id)
+}
+
+/// T-016：删除单个文档的索引（chunks + 文件记录），返回删除的 chunk 数。
+///
+/// 前端删除知识文件时必须先调用它，再删磁盘文件；否则已删内容仍会被
+/// `rag_search` 从 sled 里召回。旧数据（chunk 键用 `filename` 而非 `file_id`）
+/// 由 `delete_document` 内部兼容。
+#[tauri::command]
+pub fn rag_delete_document(kb_id: String, file_id: String) -> Result<usize, String> {
+    crate::db::knowledge::delete_document(&kb_id, &file_id)
 }

@@ -11,6 +11,24 @@ interface Props {
   onCancel: () => void;
 }
 
+/**
+ * 从 JSON.parse 的报错里取行号：
+ *  - 新版 V8 直接给 "(line N column M)"；
+ *  - 老版本只给 "at position N"，按前缀换行数换算。
+ * 取不到时返回 null，错误提示仍会显示原始 message。
+ */
+function jsonErrorLine(err: unknown, source: string): number | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  const explicit = /\bline\s+(\d+)/i.exec(msg);
+  if (explicit?.[1]) return Number(explicit[1]);
+  const pos = /\bposition\s+(\d+)/i.exec(msg);
+  if (pos?.[1]) {
+    const at = Math.min(Number(pos[1]), source.length);
+    return source.slice(0, at).split("\n").length;
+  }
+  return null;
+}
+
 export function AdapterForm({ initial, onSave, onCancel }: Props) {
   // Escape 关闭(此前只有底部取消按钮)
   useEscapeClose(onCancel);
@@ -27,17 +45,33 @@ export function AdapterForm({ initial, onSave, onCancel }: Props) {
   const [headersJson, setHeadersJson] = useState(
     JSON.stringify(initial?.request_headers || { "Content-Type": "application/json" }, null, 2)
   );
+  // Headers JSON 解析失败时阻止保存并提示（旧实现静默替换成默认值，用户输入丢失）
+  const [headersError, setHeadersError] = useState<string | null>(null);
   const [ssePrefix, setSsePrefix] = useState(initial?.sse_data_prefix || "data: ");
   const [sseDone, setSseDone] = useState(initial?.sse_done_marker || "[DONE]");
   const [ssePath, setSsePath] = useState(initial?.sse_content_path || "$.choices[0].delta.content");
 
   const handleSave = () => {
-    let headers: Record<string, string> = {};
+    let headers: Record<string, string>;
     try {
-      headers = JSON.parse(headersJson);
-    } catch {
-      headers = { "Content-Type": "application/json" };
+      const parsed: unknown = JSON.parse(headersJson);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("Headers must be a JSON object");
+      }
+      const obj = parsed as Record<string, unknown>;
+      const badKey = Object.keys(obj).find((k) => typeof obj[k] !== "string");
+      if (badKey !== undefined) {
+        throw new Error(`Header "${badKey}" must have a string value`);
+      }
+      headers = obj as Record<string, string>;
+    } catch (e) {
+      // 不落盘、不清空输入框：保留用户原文，让用户自己改。
+      const msg = e instanceof Error ? e.message : String(e);
+      const line = jsonErrorLine(e, headersJson);
+      setHeadersError(`Invalid headers JSON${line !== null ? ` (line ${line})` : ""}: ${msg}`);
+      return;
     }
+    setHeadersError(null);
     onSave({
       name,
       mode,
@@ -138,11 +172,23 @@ export function AdapterForm({ initial, onSave, onCancel }: Props) {
               <label className="text-xs font-medium block mb-1">Custom Headers (JSON)</label>
               <textarea
                 value={headersJson}
-                onChange={(e) => setHeadersJson(e.target.value)}
+                onChange={(e) => {
+                  setHeadersJson(e.target.value);
+                  setHeadersError(null);
+                }}
                 rows={4}
                 spellCheck={false}
-                className="w-full px-3 py-2 text-xs font-mono bg-background border border-border rounded-md resize-none"
+                aria-label="Custom Headers (JSON)"
+                aria-invalid={headersError !== null}
+                className={`w-full px-3 py-2 text-xs font-mono bg-background border rounded-md resize-none ${
+                  headersError ? "border-destructive" : "border-border"
+                }`}
               />
+              {headersError && (
+                <p role="alert" className="text-[10px] text-destructive mt-1">
+                  {headersError}
+                </p>
+              )}
               <label className="text-xs font-medium block mb-1">SSE Parsing Rules</label>
               <SseRuleBuilder
                 dataPrefix={ssePrefix}

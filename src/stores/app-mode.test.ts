@@ -64,3 +64,46 @@ describe("useAppModeStore.workSubMode", () => {
     expect(store.getState().workSubMode).toBe("work");
   });
 });
+
+// ── T-151:其余持久化枚举同样必须校验,不能直接 as 断言 ──────────────
+
+const MODE_KEY = "app_mode";
+const TAV_KEY = "tavern_sub_mode";
+
+describe("useAppModeStore.mode 校验(T-151)", () => {
+  it("无存量值时默认 work", async () => {
+    const store = await freshStore();
+    expect(store.getState().mode).toBe("work");
+  });
+
+  it("初始化时恢复合法值 tavern", async () => {
+    localStorage.setItem(MODE_KEY, "tavern");
+    const store = await freshStore();
+    expect(store.getState().mode).toBe("tavern");
+  });
+
+  it("非法存量值回落 work", async () => {
+    localStorage.setItem(MODE_KEY, "bogus");
+    const store = await freshStore();
+    expect(store.getState().mode).toBe("work");
+  });
+});
+
+describe("useAppModeStore.tavernSubMode 校验(T-151)", () => {
+  it("无存量值时默认 rp", async () => {
+    const store = await freshStore();
+    expect(store.getState().tavernSubMode).toBe("rp");
+  });
+
+  it("初始化时恢复合法值 simulate", async () => {
+    localStorage.setItem(TAV_KEY, "simulate");
+    const store = await freshStore();
+    expect(store.getState().tavernSubMode).toBe("simulate");
+  });
+
+  it("非法存量值回落 rp", async () => {
+    localStorage.setItem(TAV_KEY, "bogus");
+    const store = await freshStore();
+    expect(store.getState().tavernSubMode).toBe("rp");
+  });
+});

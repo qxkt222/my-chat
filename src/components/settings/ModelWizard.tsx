@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { X, ChevronRight, ChevronLeft, ArrowRight, Settings2 } from "lucide-react";
-import { useSettingsStore } from "@/stores/useSettingsStore";
+import { normalizeApiUrl, useSettingsStore } from "@/stores/useSettingsStore";
 import { useT } from "@/lib/i18n";
 import { BUILTIN_PRESETS } from "@/adapters/registry";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
+import { showToast } from "@/components/ui/Toast";
 import type { ApiTemplate } from "@/types";
 
 export function ModelWizard({ onDone }: { onDone: () => void }) {
@@ -20,6 +21,8 @@ export function ModelWizard({ onDone }: { onDone: () => void }) {
   const [customUrl, setCustomUrl] = useState("");
   const [customName, setCustomName] = useState("");
   const [customModel, setCustomModel] = useState("");
+  // T-033: 自定义地址的 scheme 校验错误（null = 无错误）
+  const [customUrlError, setCustomUrlError] = useState<"scheme" | "invalid" | null>(null);
 
   const pick = (p: ApiTemplate) => {
     setPreset(p);
@@ -39,21 +42,49 @@ export function ModelWizard({ onDone }: { onDone: () => void }) {
       model: model || "",
     });
     s.setActiveModel(name || preset.name);
-    await s.save();
+    // T-097:保存失败必须让用户看见,且不关闭向导(否则模型只在内存里)
+    try {
+      await s.save();
+    } catch (e) {
+      showToast("error", `${t("settings.saveFailed")} ${String(e)}`);
+      return;
+    }
     onDone();
   };
 
+  /**
+   * 失焦/保存前的归一化：缺 scheme 自动补 http://；非 http(s) 明确报错。
+   * 返回可用地址；不可用（含空输入）返回 null。
+   */
+  const normalizeCustomUrl = (): string | null => {
+    const result = normalizeApiUrl(customUrl);
+    if (result.ok) {
+      setCustomUrl(result.url);
+      setCustomUrlError(null);
+      return result.url;
+    }
+    // 空输入不弹错（由按钮禁用兜底），其余错误必须让用户看见
+    setCustomUrlError(result.reason === "empty" ? null : result.reason);
+    return null;
+  };
+
   const saveCustom = async () => {
-    if (!customUrl.trim() || !customName.trim()) return;
+    const apiUrl = normalizeCustomUrl();
+    if (!apiUrl || !customName.trim()) return;
     s.addModel({
       name: customName.trim(),
       provider: "custom",
-      api_url: customUrl.trim(),
+      api_url: apiUrl,
       api_key: apiKey,
       model: customModel.trim() || "model",
     });
     s.setActiveModel(customName.trim());
-    await s.save();
+    try {
+      await s.save();
+    } catch (e) {
+      showToast("error", `${t("settings.saveFailed")} ${String(e)}`);
+      return;
+    }
     onDone();
   };
 
@@ -204,10 +235,21 @@ export function ModelWizard({ onDone }: { onDone: () => void }) {
               </label>
               <input
                 value={customUrl}
-                onChange={(e) => setCustomUrl(e.target.value)}
+                onChange={(e) => {
+                  setCustomUrl(e.target.value);
+                  setCustomUrlError(null);
+                }}
+                onBlur={normalizeCustomUrl}
                 placeholder="https://api.example.com/v1 或完整 /chat/completions 地址"
                 className="w-full px-2 py-1.5 text-xs bg-background border border-input rounded"
               />
+              {customUrlError && (
+                <p className="text-[10px] text-destructive mt-1">
+                  {customUrlError === "scheme"
+                    ? t("wizard.apiUrlScheme")
+                    : t("wizard.apiUrlInvalid")}
+                </p>
+              )}
             </div>
             <div>
               <label className="text-[10px] text-muted-foreground block mb-0.5">
@@ -234,7 +276,7 @@ export function ModelWizard({ onDone }: { onDone: () => void }) {
             </div>
             <button
               onClick={saveCustom}
-              disabled={!customUrl.trim() || !customName.trim()}
+              disabled={!customUrl.trim() || !customName.trim() || customUrlError !== null}
               className="w-full py-2 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40 flex items-center justify-center gap-1"
             >
               <ArrowRight className="w-3.5 h-3.5" /> {t("wizard.saveUseCustom")}

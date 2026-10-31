@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 type DialogState =
   | { mode: "confirm"; message: string; resolve: (v: boolean) => void }
@@ -52,20 +53,18 @@ export function ConfirmDialogHost() {
 
   const st = pending;
 
-  // Escape 取消(与遮罩点击一致:confirm→false, prompt→null)
-  useEffect(() => {
-    if (!st) return;
-    const h = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopImmediatePropagation();
-        const r = st.resolve;
-        setPending(null);
-        r((st.mode === "confirm" ? false : null) as never);
-      }
-    };
-    window.addEventListener("keydown", h, true);
-    return () => window.removeEventListener("keydown", h, true);
-  }, [st]);
+  // Escape 取消(与遮罩点击一致:confirm→false, prompt→null)。
+  // T-102:走统一的 Escape 层级栈,确认框只在最上层时消费 Esc,
+  // 不会顺带关掉下面的设置弹窗。
+  useEscapeClose(
+    st
+      ? () => {
+          const r = st.resolve;
+          setPending(null);
+          r((st.mode === "confirm" ? false : null) as never);
+        }
+      : undefined
+  );
 
   if (!st) return null;
 

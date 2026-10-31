@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ApiTemplate } from "@/types";
-import { getAppDir, readFile, writeFile, listDir, deleteItem } from "@/lib/tauri";
+import { getAppDir, readFile, writeFile, listDir, deleteItem, logDiag } from "@/lib/tauri";
+import { sanitizeApiTemplate } from "@/lib/persist-sanitize";
 
 interface AdapterState {
   templates: ApiTemplate[];
@@ -30,8 +31,19 @@ export const useAdapterStore = create<AdapterState>((set, get) => ({
       const templates: ApiTemplate[] = [];
       for (const f of userFiles) {
         if (!f.endsWith(".json")) continue;
-        const raw = await readFile(`${appDir}/adapters/${f}`);
-        templates.push(JSON.parse(raw));
+        // T-136:adapters/*.json 是用户可手改的不可信输入,必须过 persist-sanitize;
+        // 单个坏文件隔离(跳过)而不是让整个 load 抛错、全部模板消失。
+        try {
+          const raw = await readFile(`${appDir}/adapters/${f}`);
+          const template = sanitizeApiTemplate(JSON.parse(raw) as unknown);
+          if (!template.id) {
+            logDiag(`adapters/${f}: 缺少 id,已隔离`);
+            continue;
+          }
+          templates.push(template);
+        } catch (e) {
+          logDiag(`adapters/${f}: 解析失败,已隔离 (${String(e)})`);
+        }
       }
       set({ templates, loaded: true });
     } catch {
@@ -82,9 +94,12 @@ export const useAdapterStore = create<AdapterState>((set, get) => ({
 
   importTemplate: async (json) => {
     try {
-      const template = JSON.parse(json) as ApiTemplate;
+      // 导入同样走 sanitize(外部 JSON 和磁盘文件一样不可信)
+      const template = sanitizeApiTemplate(JSON.parse(json) as unknown);
+      // 完全无意义的对象(没名字也没 URL)直接拒绝,不生成垃圾模板
+      if (!template.name.trim() && !template.api_url.trim()) return;
       await get().create({
-        name: template.name + " (imported)",
+        name: `${template.name || "导入的适配器"} (imported)`,
         mode: template.mode,
         api_url: template.api_url,
         request_method: template.request_method,

@@ -34,6 +34,7 @@ import {
   groupOf,
   migrateLegacyEntries,
   moveWithin,
+  registerRosterIndex,
 } from "@/lib/preset-roster";
 
 /** 名册索引的文件名（放在 presets/ 下；load 时必须跳过它，否则会被当成一条预设） */
@@ -326,6 +327,9 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       } catch {
         /* ignore */
       }
+      // 把索引登记给拼装层：groupOrder 必须参与 assembleRoster，否则跨包顺序
+      // 会退回包名字典序、UI 的包排序形同虚设（T-031）
+      registerRosterIndex(rosterIndex);
       set({
         characters,
         personas,
@@ -347,16 +351,18 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
       const appDir = await getAppDir();
       const raw = await readFile(`${appDir}/presets/${ROSTER_INDEX_FILE}`);
       const parsed = JSON.parse(raw) as Partial<PresetRosterIndex>;
-      set({
-        rosterIndex: {
-          groupOrder: Array.isArray(parsed.groupOrder) ? parsed.groupOrder : [],
-          entryOrder:
-            parsed.entryOrder && typeof parsed.entryOrder === "object" ? parsed.entryOrder : {},
-          updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
-        },
-      });
+      const rosterIndex: PresetRosterIndex = {
+        groupOrder: Array.isArray(parsed.groupOrder) ? parsed.groupOrder : [],
+        entryOrder:
+          parsed.entryOrder && typeof parsed.entryOrder === "object" ? parsed.entryOrder : {},
+        updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
+      };
+      registerRosterIndex(rosterIndex);
+      set({ rosterIndex });
     } catch {
-      set({ rosterIndex: emptyRosterIndex() });
+      const rosterIndex = emptyRosterIndex();
+      registerRosterIndex(rosterIndex);
+      set({ rosterIndex });
     }
   },
 
@@ -417,6 +423,7 @@ export const useCharacterStore = create<CharacterState>((set, get) => ({
     } catch {
       /* ignore */
     }
+    registerRosterIndex(nextIndex);
     set({ presets: reordered, rosterIndex: nextIndex });
   },
 

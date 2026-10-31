@@ -46,6 +46,18 @@ function flushPendingStreams(): void {
   streamBatcher.flush();
 }
 
+/** requestId → sendMessage 的收尾回调。回调在最终正文写入会话 store 之后触发，
+ *  让发送 Promise 的 resolve 时间点 = 正文可被读到的时刻 (T-021)。 */
+const streamSettlers = new Map<string, (finalText: string) => void>();
+
+/** 收尾某条流：把最终正文交给等待中的 sendMessage（重复调用安全） */
+function settleStream(requestId: string, finalText: string): void {
+  const settle = streamSettlers.get(requestId);
+  if (!settle) return;
+  streamSettlers.delete(requestId);
+  settle(finalText);
+}
+
 // Register messages provider for plugins
 setMessagesProvider(() => {
   const conv = useConversationStore.getState().getActive();
@@ -68,6 +80,8 @@ interface ChatState {
   /** msgId → {requestId, convId} 映射：流式期间前端气泡直接读 streamingContent，
    *  conversations 数组保持不动（P1-1：流式不再每 250ms 重写数组/落盘） */
   streamMsgMap: Record<string, { requestId: string; convId: string }>;
+  /** 正在做上下文压缩的会话：期间 sendMessage / regenerate 一律拒绝 (T-019) */
+  compressingConvIds: string[];
   /** 工作模式自动记忆(记忆卡):历史超阈值自动摘要注入上下文(默认关,防意外耗 token) */
   workAutoSummarize: boolean;
   /** 临时会话(免记忆):开启时本次会话完全不读写记忆(ChatGPT Memory 临时对话) */
@@ -87,10 +101,17 @@ interface ChatState {
     knowledgeContext?: string,
     /** 重新生成专用:不新增 user 消息(行业标准:replay the last turn,
      *  user 消息保持不动,只替换 AI 回复)——避免旧 user + 新 user 重复 */
-    opts?: { skipUserAppend?: boolean }
-  ) => Promise<void>;
+    opts?: {
+      skipUserAppend?: boolean;
+      /** T-034: 钉住的发送目标会话；缺省仍取当前 activeId（兼容旧调用）。
+       *  预处理期间用户切走会话时，消息不会落到新会话。 */
+      convId?: string | undefined;
+    }
+  ) => Promise<string>;
   cancelGeneration: (requestId?: string) => void;
-  regenerate: () => Promise<void>;
+  /** 重新生成：传 msgId 时只重生成该气泡（并用它的模型）；
+   *  不传时保持旧行为「重生成最后一轮 assistant」。 */
+  regenerate: (msgId?: string) => Promise<void>;
   /** Context compression (Chatbox): summarize history, clear old messages, seed summary */
   compressContext: () => Promise<void>;
   /** 工作模式自动记忆(记忆卡):回合完成后检查,历史超阈值自动总结合并进 conv.summary */
@@ -107,13 +128,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamErrorKinds: {},
   activeStreams: [],
   streamMsgMap: {},
+  compressingConvIds: [],
   workAutoSummarize: localStorage.getItem(WORK_SUMMARIZE_KEY) === "1",
   workTempMode: localStorage.getItem(WORK_TEMP_MODE_KEY) === "1",
 
   sendMessage: async (content, models, systemPrompt, knowledgeContext, opts) => {
     const convStore = useConversationStore.getState();
     const settingsStore = useSettingsStore.getState();
-    let convId = convStore.activeId;
+    // T-034: 调用方可钉死目标会话（ChatInput 在预处理开始时就传入）。
+    // 缺省仍取「当前」activeId，保持旧调用方行为不变。
+    let convId = opts?.convId ?? convStore.activeId;
+
+    // T-019: 压缩上下文期间该会话禁止发送——压缩完成后会以摘要替换历史，
+    // 期间发出的回合会被一并清掉；直接拒绝并提示，而不是静默排队。
+    if (convId && get().compressingConvIds.includes(convId)) {
+      showToast("info", t("chat.compressing"));
+      return "";
+    }
 
     if (!convId) {
       const conv = await convStore.create();
@@ -134,7 +165,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // stable prefix first (system prompt + history), variable tail last
     // (new user message + knowledge context). Keeping the knowledge context at
     // the END means only the tail changes between turns → prefix stays cached.
-    const conv = convStore.getActive();
+    // T-034: 组装历史必须用「钉住的会话」，不能用 getActive()——预处理期间
+    // 用户切走后 activeId 已指向别的会话，历史会拼错。
+    const liveConvStore = useConversationStore.getState();
+    const conv = opts?.convId
+      ? (liveConvStore.allConversations.find((c) => c.id === convId) ??
+        liveConvStore.conversations.find((c) => c.id === convId))
+      : liveConvStore.getActive();
     const messages: Pick<Message, "role" | "content">[] = [];
 
     // RP 会话(带角色卡):三段式组装(DeepSeek 缓存优化核心——stableSystem 前缀恒定,
@@ -274,6 +311,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
     }));
 
+    // T-021: 每条流注册一个收尾等待器 —— finish() 在最终正文写入会话 store
+    // 之后才 resolve 它；sendMessage 等全部收尾完成再返回，prompt 链因此不会
+    // 在「正文还没落库」时读到空占位。
+    const completions = streams.map(
+      ({ requestId }) =>
+        new Promise<string>((resolve) => {
+          streamSettlers.set(requestId, resolve);
+        })
+    );
+
     // Run all streams concurrently
     await Promise.all(
       streams.map(({ requestId, msgId: asmId, modelName, modelConfig }) => {
@@ -367,41 +414,63 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const finalError = get().streamErrors[requestId] || "";
           const finalErrorKind = get().streamErrorKinds[requestId] || "";
           const entry = get().streamMsgMap[asmId];
-          set((s) => {
-            const activeStreams = s.activeStreams.filter((id) => id !== requestId);
-            const streamingContent = { ...s.streamingContent };
-            delete streamingContent[requestId];
-            const streamingReasoning = { ...s.streamingReasoning };
-            delete streamingReasoning[requestId];
-            const streamErrors = { ...s.streamErrors };
-            delete streamErrors[requestId];
-            const streamErrorKinds = { ...s.streamErrorKinds };
-            delete streamErrorKinds[requestId];
-            const streamMsgMap = { ...s.streamMsgMap };
-            delete streamMsgMap[asmId];
-            return {
-              activeStreams,
-              streamingContent,
-              streamingReasoning,
-              streamErrors,
-              streamErrorKinds,
-              streamMsgMap,
-              isStreaming: activeStreams.length > 0,
-            };
-          });
-          // Final flush so the last tokens + reasoning are persisted (once per turn)
-          if (entry) {
+
+          // T-021: 先把最终正文落库，再从流式状态移除 —— 顺序反过来时，
+          // 「清空流式覆盖」与「updateMessage 的 set」之间气泡会闪成空占位，
+          // 且 sendMessage 会在正文可读之前 resolve。
+          const persist = (async (): Promise<string> => {
+            if (!entry) return "";
+            let out = "";
             if (finalContent) {
               // 响应后处理钩子(插件 afterResponse):落盘前应用
               const processed = pluginAPI.executeAfterResponse(finalContent);
-              convStore.updateMessage(entry.convId, asmId, processed);
+              out = processed;
+              await convStore.updateMessage(entry.convId, asmId, processed);
             }
             if (finalReasoning)
-              convStore.updateMessageReasoning(entry.convId, asmId, finalReasoning);
+              await convStore.updateMessageReasoning(entry.convId, asmId, finalReasoning);
             // F4 + 错误命名化: 分类与内容分离落盘——失败不污染消息正文
             if (finalError)
-              convStore.updateMessageError(entry.convId, asmId, finalError, finalErrorKind);
-          }
+              await convStore.updateMessageError(entry.convId, asmId, finalError, finalErrorKind);
+            return out;
+          })();
+
+          const cleanup = () => {
+            set((s) => {
+              const activeStreams = s.activeStreams.filter((id) => id !== requestId);
+              const streamingContent = { ...s.streamingContent };
+              delete streamingContent[requestId];
+              const streamingReasoning = { ...s.streamingReasoning };
+              delete streamingReasoning[requestId];
+              const streamErrors = { ...s.streamErrors };
+              delete streamErrors[requestId];
+              const streamErrorKinds = { ...s.streamErrorKinds };
+              delete streamErrorKinds[requestId];
+              const streamMsgMap = { ...s.streamMsgMap };
+              delete streamMsgMap[asmId];
+              return {
+                activeStreams,
+                streamingContent,
+                streamingReasoning,
+                streamErrors,
+                streamErrorKinds,
+                streamMsgMap,
+                isStreaming: activeStreams.length > 0,
+              };
+            });
+          };
+
+          // 落库成功/失败都要清理流式状态并放行等待者（不能把 UI 卡在流式中）
+          void persist.then(
+            (text) => {
+              cleanup();
+              settleStream(requestId, text);
+            },
+            () => {
+              cleanup();
+              settleStream(requestId, "");
+            }
+          );
         };
 
         return streamChat(request, requestId, {
@@ -447,11 +516,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       })
     );
 
+    // T-021: 等到所有流把最终正文写进会话 store 才算完成。
+    const finalTexts = await Promise.all(completions);
+    // 多模型对比没有唯一正文：取最后一个有内容的流（prompt 链只发单模型）。
+    const finalText = [...finalTexts].reverse().find((text) => text) ?? "";
+
     // 记忆卡(工作模式自动记忆):回合完成,检查是否需要自动摘要(记账式阈值,只跑一次)。
     // 临时会话(免记忆)不触发。
     if (!get().workTempMode) {
-      void get().summarizeIfNeeded(convId as string);
+      void get().summarizeIfNeeded(convId);
     }
+    return finalText;
   },
 
   cancelGeneration: (requestId?: string) => {
@@ -469,8 +544,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const cur = get().streamingContent[id] || "";
       const err = get().streamErrors[id] || "";
       const errKind = get().streamErrorKinds[id] || "";
-      if (asmId && entry && cur) convStore.updateMessage(entry.convId, asmId, cur);
-      if (asmId && entry && err) convStore.updateMessageError(entry.convId, asmId, err, errKind);
+      const pending: Promise<void>[] = [];
+      if (asmId && entry && cur) pending.push(convStore.updateMessage(entry.convId, asmId, cur));
+      if (asmId && entry && err)
+        pending.push(convStore.updateMessageError(entry.convId, asmId, err, errKind));
+      // T-021: 取消路径不依赖迟到的 done 事件 —— 主动放行等待中的 sendMessage，
+      // 否则「取消后 done 丢失」会让发送 Promise 永远挂着。顺序同样保持
+      // 「先落库、再 resolve」：等待上面两笔写库完成后再放行。
+      void Promise.allSettled(pending).then(() => settleStream(id, ""));
       // Drop the listener immediately so no further tokens arrive
       set((s) => {
         const streamingContent = { ...s.streamingContent };
@@ -496,33 +577,75 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  regenerate: async () => {
+  regenerate: async (msgId) => {
+    // T-020: 流式期间点重试会删掉正在流式的占位消息并再开一条流
+    // → 并发双流、双倍 API 消耗。入口直接拒绝。
+    if (get().isStreaming) return;
+
     const convStore = useConversationStore.getState();
     const conv = convStore.getActive();
     if (!conv) return;
+    if (get().compressingConvIds.includes(conv.id)) return;
 
-    // Find last user message
-    const lastUserMsg = [...conv.messages].reverse().find((m) => m.role === "user");
-    if (!lastUserMsg) return;
-
-    // 行业标准(regenerate = replay the last turn):user 消息保留不动,
-    // 只删除并替换尾部的 assistant 回复(s)。
-    await convStore.removeLastAssistantMessage(conv.id);
-    // If multiple models answered in parallel, remove all trailing assistant messages of this turn
-    // 循环内重新取活跃会话,避免引用过期导致死循环
-    for (;;) {
-      const cur = convStore.getActive();
-      if (!cur) break;
-      if (cur.messages[cur.messages.length - 1]?.role !== "assistant") break;
-      await convStore.removeLastAssistantMessage(conv.id);
+    // 目标：指定气泡（旧气泡重试）或最后一轮的全部 assistant（旧行为）。
+    let userMsg: Message | undefined;
+    let trailingAssistants: Message[] = [];
+    if (msgId) {
+      const idx = conv.messages.findIndex((m) => m.id === msgId);
+      const target = idx >= 0 ? conv.messages[idx] : undefined;
+      if (!target || target.role !== "assistant") return;
+      for (let i = idx - 1; i >= 0; i--) {
+        const m = conv.messages[i];
+        if (m?.role === "user") {
+          userMsg = m;
+          break;
+        }
+      }
+      if (!userMsg) return;
+    } else {
+      let lastUserIdx = -1;
+      for (let i = conv.messages.length - 1; i >= 0; i--) {
+        if (conv.messages[i]?.role === "user") {
+          lastUserIdx = i;
+          break;
+        }
+      }
+      if (lastUserIdx < 0) return;
+      const picked = conv.messages[lastUserIdx];
+      if (!picked) return;
+      userMsg = picked;
+      trailingAssistants = conv.messages
+        .slice(lastUserIdx + 1)
+        .filter((m) => m.role === "assistant");
+      if (trailingAssistants.length === 0) return;
     }
+    if (!userMsg) return;
 
-    // Re-send with the same model(s) — skipUserAppend:不新增重复的 user 消息
+    // T-020: 先解析模型再删消息——模型为空（被删/未选）时不得静默丢上一条回复。
+    // 指定气泡优先用它自己的模型（对比模式逐路处理），回退当前模型。
     const settingsStore = useSettingsStore.getState();
-    const model = settingsStore.models.find((m) => m.name === settingsStore.activeModel);
+    const targetModelName = msgId
+      ? conv.messages.find((m) => m.id === msgId)?.model || settingsStore.activeModel
+      : settingsStore.activeModel;
+    const model =
+      settingsStore.models.find((m) => m.name === targetModelName) ??
+      (targetModelName !== settingsStore.activeModel
+        ? settingsStore.models.find((m) => m.name === settingsStore.activeModel)
+        : undefined);
     if (!model) return;
 
-    await get().sendMessage(lastUserMsg.content, [model], conv.system_prompt, undefined, {
+    // 行业标准(regenerate = replay the last turn):user 消息保留不动,
+    // 只删除并替换目标 assistant 回复(s)。
+    if (msgId) {
+      await convStore.removeMessage(conv.id, msgId);
+    } else {
+      for (let i = 0; i < trailingAssistants.length; i++) {
+        await convStore.removeLastAssistantMessage(conv.id);
+      }
+    }
+
+    // skipUserAppend:不新增重复的 user 消息
+    await get().sendMessage(userMsg.content, [model], conv.system_prompt, undefined, {
       skipUserAppend: true,
     });
   },
@@ -531,6 +654,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const convStore = useConversationStore.getState();
     const conv = convStore.getActive();
     if (!conv || conv.messages.length === 0) return;
+    // 压缩完成后会以摘要替换历史；流式中的占位消息不能被清掉。
+    if (get().isStreaming) return;
+    const convId = conv.id;
+    if (get().compressingConvIds.includes(convId)) return;
     const settingsStore = useSettingsStore.getState();
     const model = settingsStore.models.find((m) => m.name === settingsStore.activeModel);
     if (!model) return;
@@ -547,33 +674,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const sys =
       "你是对话总结器。请把以下对话提炼成精炼的中文摘要（保留关键事实、结论、用户偏好、未决问题），300字以内，只输出摘要正文。";
 
-    showToast("info", t("chat.compressing"));
+    // T-019: 压缩期间置忙碌标志（输入框禁用、sendMessage/regenerate 拒绝）。
+    // baselineCount 是压缩期间「可被摘要替换」的消息数基线。
+    const baselineCount = conv.messages.length;
+    set((s) => ({ compressingConvIds: [...s.compressingConvIds, convId] }));
+    try {
+      showToast("info", t("chat.compressing"));
 
-    // Raw streaming call — does NOT touch the conversation (no user/assistant msgs added)。
-    // 只有流完整结束才允许用它替换历史：中断时的半截摘要会永久丢上下文。
-    const result = await runSummarize({
-      model,
-      systemPrompt: sys,
-      userContent: transcript,
-      label: "work-compress",
-    });
-    const summary = result.summary;
-    if (!result.complete || !summary) {
-      showToast("error", t("chat.compressFailed"));
-      return;
+      // Raw streaming call — does NOT touch the conversation (no user/assistant msgs added)。
+      // 只有流完整结束才允许用它替换历史：中断时的半截摘要会永久丢上下文。
+      const result = await runSummarize({
+        model,
+        systemPrompt: sys,
+        userContent: transcript,
+        label: "work-compress",
+      });
+      const summary = result.summary;
+      if (!result.complete || !summary) {
+        showToast("error", t("chat.compressFailed"));
+        return;
+      }
+
+      // Replace history with a system summary. 基线校验在 replaceMessages 内：
+      // 压缩期间新增的消息合并保留；期间消息被删则放弃替换 (T-019)。
+      const now = new Date().toISOString();
+      const replaced = await convStore.replaceMessages(
+        convId,
+        [
+          {
+            id: msgId(),
+            role: "system",
+            content: `【此前对话摘要】\n${summary}`,
+            timestamp: now,
+          },
+        ],
+        baselineCount
+      );
+      if (!replaced) {
+        showToast("error", t("chat.compressFailed"));
+        return;
+      }
+      showToast("success", t("chat.compressSuccess"));
+    } finally {
+      set((s) => ({
+        compressingConvIds: s.compressingConvIds.filter((id) => id !== convId),
+      }));
     }
-
-    // Replace history with a system summary + keep it out of the next reply
-    const now = new Date().toISOString();
-    await convStore.replaceMessages(conv.id, [
-      {
-        id: msgId(),
-        role: "system",
-        content: `【此前对话摘要】\n${summary}`,
-        timestamp: now,
-      },
-    ]);
-    showToast("success", t("chat.compressSuccess"));
   },
 
   setWorkAutoSummarize: (on) => {

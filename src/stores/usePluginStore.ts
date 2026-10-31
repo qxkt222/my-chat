@@ -49,7 +49,10 @@ function persistEnabled(ids: string[]) {
 export const usePluginStore = create<PluginState>((set) => ({
   plugins: [],
   load: () => {
-    // 恢复持久化状态:先 apply,再刷新列表
+    // 恢复持久化状态:先 apply,再刷新列表。
+    // 幂等:pluginAPI.activate/deactivate 只在 enabled 实际变化时才动 hook,
+    // 所以 App 启动与 PluginManager 挂载各调一次不会重复激活/重复注册
+    // (见 usePluginStore.test.ts「重复调用 load() 不会重复注册」)。
     const enabled = loadEnabled();
     for (const p of listPlugins()) {
       const shouldEnable = enabled.has(p.manifest.id);

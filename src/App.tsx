@@ -8,6 +8,8 @@ import { useAdapterStore } from "./stores/useAdapterStore";
 import { useMemoryStore } from "./stores/useMemoryStore";
 import { useCharacterStore } from "./stores/useCharacterStore";
 import { useTranslateStore } from "./stores/useTranslateStore";
+import { useLlamaStore } from "./stores/useLlamaStore";
+import { usePluginStore } from "./stores/usePluginStore";
 import { useChatStore } from "./stores/useChatStore";
 import { useAppConfigStore, applyFontSize } from "./stores/useAppConfigStore";
 import { AppShell } from "./components/layout/AppShell";
@@ -65,6 +67,12 @@ export default function App() {
       useMemoryStore.getState().load(),
       useCharacterStore.getState().load(),
       useTranslateStore.getState().load(),
+      useLlamaStore.getState().load(),
+      // 插件启用状态必须随启动恢复,否则 /translate、/search、/summarize 等
+      // 斜杠命令与 code-reviewer 的 beforeSend 要等用户打开设置页才生效。
+      // load() 是同步函数:包一层 Promise.resolve().then 后,即使插件 hook 同步
+      // 抛错也会变成 rejection 交给下方统一 catch,不会卡住整个启动。
+      Promise.resolve().then(() => usePluginStore.getState().load()),
     ])
       .catch((e: unknown) => {
         // 单店 load() 内部大多自吞异常；这里兜住意外 rejection，避免启动时

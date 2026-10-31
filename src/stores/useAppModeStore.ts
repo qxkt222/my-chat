@@ -11,7 +11,20 @@ const MODE_KEY = "app_mode";
 const SUB_MODE_KEY = "tavern_sub_mode";
 const WORK_SUB_MODE_KEY = "work_sub_mode";
 
-/** 只认合法值:手改/旧版本残留的非法值一律回落默认 "work" */
+/**
+ * 只认合法值:手改/旧版本残留的非法值一律回落默认(T-151)。
+ * 旧实现直接 `as AppMode` 断言,坏值会让模式不高亮、界面进入未定义态。
+ */
+function readAppMode(): AppMode {
+  const v = localStorage.getItem(MODE_KEY);
+  return v === "work" || v === "tavern" ? v : "work";
+}
+
+function readTavernSubMode(): TavernSubMode {
+  const v = localStorage.getItem(SUB_MODE_KEY);
+  return v === "rp" || v === "simulate" ? v : "rp";
+}
+
 function readWorkSubMode(): WorkSubMode {
   const v = localStorage.getItem(WORK_SUB_MODE_KEY);
   return v === "chat" || v === "work" ? v : "work";
@@ -30,8 +43,8 @@ interface AppModeState {
 
 /** 顶层模式切换:工作模式 = 现有完整应用;酒馆模式 = 创作空间(角色扮演 / 故事推演) */
 export const useAppModeStore = create<AppModeState>((set) => ({
-  mode: (localStorage.getItem(MODE_KEY) as AppMode) || "work",
-  tavernSubMode: (localStorage.getItem(SUB_MODE_KEY) as TavernSubMode) || "rp",
+  mode: readAppMode(),
+  tavernSubMode: readTavernSubMode(),
   workSubMode: readWorkSubMode(),
   setMode: (m) => {
     localStorage.setItem(MODE_KEY, m);

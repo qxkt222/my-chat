@@ -4,6 +4,7 @@ pub mod chat;
 pub mod db;
 pub mod docs;
 pub mod draw;
+pub mod llama;
 pub mod mcp;
 pub mod memory;
 pub mod rag;

@@ -46,10 +46,22 @@ const LIBRE_CODES: Record<string, string> = {
   Deutsch: "de",
   Русский: "ru",
 };
+/** 本地 OpenAI 兼容模型用 BCP-47 语言码（与 Google 同表） */
+const LOCAL_CODES: Record<string, string> = {
+  中文: "zh-CN",
+  English: "en",
+  日本語: "ja",
+  한국어: "ko",
+  Français: "fr",
+  Deutsch: "de",
+  Русский: "ru",
+};
 
-function langCode(targetLang: string, engine: TranslateEngine): string | undefined {
+/** 展示语言名 → 引擎语言码；未支持的语言返回 undefined */
+export function langCode(targetLang: string, engine: TranslateEngine): string | undefined {
   if (engine === "deepl") return DEEPL_CODES[targetLang];
   if (engine === "libre") return LIBRE_CODES[targetLang];
+  if (engine === "local") return LOCAL_CODES[targetLang];
   return GOOGLE_CODES[targetLang];
 }
 
@@ -58,7 +70,24 @@ export async function translateText(text: string, targetLang: string): Promise<s
   const s = useTranslateStore.getState();
   const code = langCode(targetLang, s.engine);
   if (!code) throw new Error(`不支持的目标语言: ${targetLang}`);
-  return invokeTranslate(text, code, s.engine, s.deeplKey, s.libreUrl, s.proxyUrl);
+  return invokeTranslate(text, {
+    engine: s.engine,
+    targetLang: code,
+    deeplKey: s.deeplKey,
+    libreUrl: s.libreUrl,
+    proxyUrl: s.proxyUrl,
+    local:
+      s.engine === "local"
+        ? {
+            baseUrl: s.localBaseUrl,
+            apiKey: s.localApiKey,
+            model: s.localModel,
+            temperature: s.localTemperature,
+            systemPrompt: s.localSystemPrompt,
+            timeoutSecs: s.localTimeoutSecs,
+          }
+        : null,
+  });
 }
 
 /** 判断文本是否含中文字符(用于默认目标语言建议) */

@@ -31,6 +31,7 @@ import { extractGraph } from "@/lib/memory-graph";
 import { lastAssistantIndex } from "@/lib/message-selectors";
 import { filterCharacters, groupConversationsByCharacter } from "./selectors";
 import { useT } from "@/lib/i18n";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { detectEmotion, emotionImagePath, emotionImageExists } from "@/lib/emotion";
 import { showToast } from "@/components/ui/Toast";
 import { askPrompt } from "@/components/ui/ConfirmDialog";
@@ -170,6 +171,10 @@ export function TavernView({ onOpenSettings }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 以 activeId/条数作变更键,避免每 token 重算
   }, [showGraph, activeId, activeMsgCount, charStore.characters]);
 
+  // 记忆图谱 Esc 关闭:只在面板打开时入栈(未打开传 undefined),
+  // 避免与设置弹窗/上下文查看器抢 Esc;关闭按钮与 Esc 共用同一状态出口。
+  useEscapeClose(showGraph ? () => setShowGraph(false) : undefined);
+
   // 异步校验:检测到表情但文件不存在(如酒馆卡带 emotions 却没上传表情图)的消息,
   // 标记为回退角色头像——此前直接渲染 asset:// 不存在路径导致头像全破。
   // 依赖收窄(审计 SRC-04):不再依赖 active 对象(流式每 token 换新引用),
@@ -229,15 +234,13 @@ export function TavernView({ onOpenSettings }: Props) {
   };
 
   // 消息编辑:弹输入框,改后落盘到 tavern/{id}.json
+  // 初始值取当前版本(variants 是真源);store 负责把改动同步回 variants[variantIndex]
   const editMessage = async (msg: Message) => {
     if (!active) return;
-    const updated = await askPrompt(t("chat.edit"), msg.content);
-    if (updated === null || updated === msg.content) return;
-    await tavern.saveConv({
-      ...active,
-      updated_at: new Date().toISOString(),
-      messages: active.messages.map((m) => (m.id === msg.id ? { ...m, content: updated } : m)),
-    });
+    const current = msg.variants?.[msg.variantIndex ?? 0] ?? msg.content;
+    const updated = await askPrompt(t("chat.edit"), current);
+    if (updated === null || updated === current) return;
+    await tavern.editMessage(msg.id, updated);
   };
 
   const startCharacter = async (charId: string) => {
@@ -1115,7 +1118,11 @@ export function TavernView({ onOpenSettings }: Props) {
           {showGraph && active && graph && (
             <div className="px-4 py-2 border-b border-border bg-card/60 shrink-0">
               <div className="max-w-3xl mx-auto">
-                <MemoryGraphPanel graph={graph} onJump={jumpToMessage} />
+                <MemoryGraphPanel
+                  graph={graph}
+                  onJump={jumpToMessage}
+                  onClose={() => setShowGraph(false)}
+                />
               </div>
             </div>
           )}

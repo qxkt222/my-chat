@@ -11,7 +11,7 @@
 // 预期:无论重渲染多少次,load 只应被调用一次。
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, cleanup, waitFor } from "@testing-library/react";
+import { render, cleanup, waitFor, screen, fireEvent } from "@testing-library/react";
 
 // 所有替身状态放在 vi.hoisted 里(vi.mock 会被提升到 import 之前)
 const H = vi.hoisted(() => {
@@ -93,6 +93,7 @@ const H = vi.hoisted(() => {
     activeModel: "",
     regexRules: [],
     stoppingStrings: [],
+    samplerPresets: [],
     loaded: true,
   });
   const appModeBox = mk({ tavernSubMode: "rp", setTavernSubMode: () => {} });
@@ -145,6 +146,7 @@ vi.mock("@/stores/useSimulationStore", async () => ({
 }));
 
 import { TavernView } from "./TavernView";
+import { t } from "@/lib/i18n";
 
 /** 给 effect 自激留出多轮重渲染的时间窗 */
 function sleep(ms: number) {
@@ -162,5 +164,35 @@ describe("TavernView 挂载加载", () => {
     await sleep(150);
 
     expect(H.tavernLoad.mock.calls.length).toBe(1);
+  });
+});
+
+describe("TavernView 记忆图谱关闭", () => {
+  it("打开图谱后按 Esc 关闭面板", async () => {
+    // 一条空会话即可:图谱面板在 active 存在时渲染(0 节点 / 0 关系)
+    const conv = {
+      id: "c1",
+      character_id: "char1",
+      character_name: "测试角色",
+      title: "测试会话",
+      created_at: "",
+      updated_at: "",
+      messages: [],
+    };
+    H.tavernBox.set({
+      conversations: [conv],
+      activeId: "c1",
+      getActive: () => conv,
+    });
+
+    render(<TavernView onOpenSettings={() => {}} />);
+
+    // 点击标题栏图谱按钮打开面板
+    fireEvent.click(screen.getByTitle(t("graph.title")));
+    expect(screen.getByText("0 节点 / 0 关系")).toBeTruthy();
+
+    // Esc 关闭(useEscapeClose)
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText("0 节点 / 0 关系")).toBeNull();
   });
 });

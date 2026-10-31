@@ -1,6 +1,6 @@
 // db/conversations.rs — Conversations & messages (sled key-value)
 
-use super::{key, scan_prefix, tree};
+use super::{key, log_corrupt_record, tree, try_scan_prefix};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,9 +111,11 @@ pub fn create_conv(c: &Conversation) -> Result<(), String> {
 pub fn list_convs() -> Result<Vec<Conversation>, String> {
     let t = tree("conversations")?;
     let mut list = Vec::new();
-    for (_, v) in scan_prefix(&t, "c:") {
-        if let Ok(c) = serde_json::from_slice::<Conversation>(&v) {
-            list.push(c);
+    // T-037：扫描 IO 错误向上传播；单条记录解析失败记日志后跳过（不静默）
+    for (k, v) in try_scan_prefix(&t, "c:")? {
+        match serde_json::from_slice::<Conversation>(&v) {
+            Ok(c) => list.push(c),
+            Err(e) => log_corrupt_record("list_convs", &k, &e.to_string()),
         }
     }
     list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -137,12 +139,17 @@ pub fn update_conv(id: &str, title: &str, updated_at: &str) -> Result<(), String
 }
 
 pub fn delete_conv(id: &str) -> Result<(), String> {
+    // T-037：先扫描出待删消息，扫描失败时**什么都没删**（不留下删了一半的会话）；
+    // 旧实现先删会话再扫描，扫描出错会把消息变成孤儿。
+    let tm = tree("messages")?;
+    let msg_keys: Vec<Vec<u8>> = try_scan_prefix(&tm, &format!("m:{id}:"))?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
     let t = tree("conversations")?;
     t.remove(key("c", id)).map_err(|e| format!("Del: {e}"))?;
-    // Delete associated messages
-    let tm = tree("messages")?;
-    for (k, _) in scan_prefix(&tm, &format!("m:{id}:")) {
-        tm.remove(k).ok();
+    for k in msg_keys {
+        tm.remove(k).map_err(|e| format!("Del msg: {e}"))?;
     }
     Ok(())
 }
@@ -205,16 +212,27 @@ pub fn add_msgs_batch(
     for m in msgs {
         validate_id("会话 id", &m.conv_id)?;
         validate_id("消息 id", &m.id)?;
+        // T-065：键若按消息自带的 conv_id 构造、标题却按参数 conv_id 更新，
+        // 两者不一致时消息会被静默写进**另一个**会话。入口一律拒绝。
+        if m.conv_id != conv_id {
+            return Err(format!(
+                "批量写入的消息「{}」conv_id「{}」与参数「{conv_id}」不一致，已拒绝整批写入",
+                m.id, m.conv_id
+            ));
+        }
     }
     let t = tree("messages")?;
     // Same auto-title rule as the frontend single-add path: only seed the
     // title when this conversation had NO messages before this batch.
-    let was_empty = t
-        .scan_prefix(format!("m:{conv_id}:").as_bytes())
-        .next()
-        .is_none();
+    // T-037：只取第一条，读错误必须上报（旧实现用 `.is_none()` 把 Err 当成空）。
+    let was_empty = match t.scan_prefix(format!("m:{conv_id}:").as_bytes()).next() {
+        None => true,
+        Some(Ok(_)) => false,
+        Some(Err(e)) => return Err(format!("扫描会话「{conv_id}」消息失败: {e}")),
+    };
     for m in msgs {
-        let k = format!("m:{}:{}", m.conv_id, m.id);
+        // 键统一用参数 conv_id（与已校验的一致性双重保证）
+        let k = format!("m:{conv_id}:{}", m.id);
         t.insert(
             k.as_bytes(),
             serde_json::to_vec(m).map_err(|e| format!("Ser: {e}"))?,
@@ -255,9 +273,11 @@ pub fn add_msgs_batch(
 pub fn list_msgs(conv_id: &str) -> Result<Vec<Message>, String> {
     let t = tree("messages")?;
     let mut list = Vec::new();
-    for (_, v) in scan_prefix(&t, &format!("m:{conv_id}:")) {
-        if let Ok(m) = serde_json::from_slice::<Message>(&v) {
-            list.push(m);
+    // T-037：扫描 IO 错误向上传播；坏记录记日志后跳过（不静默）
+    for (k, v) in try_scan_prefix(&t, &format!("m:{conv_id}:"))? {
+        match serde_json::from_slice::<Message>(&v) {
+            Ok(m) => list.push(m),
+            Err(e) => log_corrupt_record("list_msgs", &k, &e.to_string()),
         }
     }
     list.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.seq.cmp(&b.seq)));
@@ -355,7 +375,12 @@ pub fn delete_last_asm_msg(conv_id: &str) -> Result<(), String> {
 /// Remove all messages of a conversation (context compression keeps only a summary)
 pub fn clear_messages(conv_id: &str) -> Result<(), String> {
     let t = tree("messages")?;
-    for (k, _) in scan_prefix(&t, &format!("m:{conv_id}:")) {
+    // T-037：扫描失败必须在删任何一条之前返回 Err，避免删一半
+    let keys: Vec<Vec<u8>> = try_scan_prefix(&t, &format!("m:{conv_id}:"))?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    for k in keys {
         t.remove(k).map_err(|e| format!("Del: {e}"))?;
     }
     Ok(())
@@ -401,6 +426,18 @@ mod tests {
         let err = add_msgs_batch("conv1", &msgs, "t", "2026-01-01T00:00:00Z")
             .expect_err("批量写入中任一 id 非法必须整批拒绝");
         assert!(err.contains("非法"), "{err}");
+    }
+
+    // T-065：批量入口的 conv_id 与消息自带 conv_id 不一致时必须整批拒绝，
+    // 不能把消息写进参数指向的会话、标题却更新另一个。
+    // 校验在 `tree()` 之前完成，所以该用例不碰全局 DB。
+    #[test]
+    fn batch_rejects_msg_with_foreign_conv_id() {
+        let msgs = vec![msg("conv1", "m1"), msg("other", "m2")];
+        let err = add_msgs_batch("conv1", &msgs, "t", "2026-01-01T00:00:00Z")
+            .expect_err("消息 conv_id 与参数不一致必须拒绝");
+        assert!(err.contains("conv_id"), "错误应指出 conv_id 不一致: {err}");
+        assert!(err.contains("other"), "错误应指出是哪条消息: {err}");
     }
 
     #[test]

@@ -46,8 +46,9 @@ export function SimulationView({ onOpenSettings }: Props) {
   // 状态/时间线面板折叠
   const [showState, setShowState] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
-  // 控制条
-  const [rounds, setRounds] = useState(3);
+  // 控制条轮数默认取会话的 autoRounds(T-107);用户手动改过后按会话记住,
+  // 切会话时自动回到该会话自己的 autoRounds(用 id 绑定草稿,避免 effect 里 setState)
+  const [roundsDraft, setRoundsDraft] = useState<{ id: string; n: number } | null>(null);
   const [timeDur, setTimeDur] = useState("");
   const [diceSel, setDiceSel] = useState("D100");
   const [diceTh, setDiceTh] = useState("");
@@ -61,11 +62,15 @@ export function SimulationView({ onOpenSettings }: Props) {
 
   const active = sim.getActive();
   const model = models.find((m) => m.name === activeModel);
+  const rounds =
+    roundsDraft && roundsDraft.id === active?.id ? roundsDraft.n : (active?.autoRounds ?? 3);
 
-  // 自动滚动
+  // 自动滚动:流式追加时 messages.length 不变,只依赖它会漏掉内容增长(T-106)。
+  // 末条消息的内容长度变化(合帧后每秒多次)也触发底部跟随;切会话/起停流同样触发。
+  const lastMsgLen = active?.messages[active.messages.length - 1]?.content.length ?? 0;
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [active?.messages.length, sim.isStreaming]);
+  }, [active?.id, active?.messages.length, lastMsgLen, sim.isStreaming]);
 
   // 过滤与分组抽到 ./presets.ts（纯函数）
   const filtered = useMemo(
@@ -372,7 +377,10 @@ export function SimulationView({ onOpenSettings }: Props) {
                     min={1}
                     max={10}
                     value={rounds}
-                    onChange={(e) => setRounds(Math.max(1, +e.target.value || 1))}
+                    onChange={(e) => {
+                      if (!active) return;
+                      setRoundsDraft({ id: active.id, n: Math.max(1, +e.target.value || 1) });
+                    }}
                     className="w-12 px-1 py-1 text-[11px] bg-background border border-input rounded"
                   />
                   <span className="text-muted-foreground">{t("sim.rounds")}</span>

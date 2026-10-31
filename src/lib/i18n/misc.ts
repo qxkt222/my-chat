@@ -1,5 +1,5 @@
 // lib/i18n/misc.ts — 由 i18n.ts 按 key 前缀拆出（自动生成，勿手工搬运 key）
-// 条目数：78
+// 条目数：79
 
 export const miscMessages: Record<string, Record<string, string>> = {
   "tool.initialize": { zh: "初始化工具…", en: "Initializing tools…" },
@@ -85,6 +85,14 @@ export const miscMessages: Record<string, Record<string, string>> = {
   "wizard.urlHint3": { zh: "完整地址 {code} → 直接使用", en: "Full {code} → used as-is" },
   "wizard.customName": { zh: "自定义名称 *", en: "Custom Name *" },
   "wizard.apiUrl": { zh: "API 地址 *", en: "API URL *" },
+  "wizard.apiUrlScheme": {
+    zh: "只支持 http:// 或 https:// 地址",
+    en: "Only http:// or https:// URLs are supported",
+  },
+  "wizard.apiUrlInvalid": {
+    zh: "地址格式无效，请输入如 localhost:11434/v1",
+    en: "Invalid URL, e.g. localhost:11434/v1",
+  },
   "wizard.apiKeyOptional": {
     zh: "API Key（可留空，适用于本地/免费服务）",
     en: "API Key (optional for local/free services)",
@@ -103,10 +111,97 @@ export const miscMessages: Record<string, Record<string, string>> = {
   "trans.busy": { zh: "翻译中…", en: "Translating…" },
   "trans.fail": { zh: "⚠️ 翻译失败：", en: "⚠️ Translation failed: " },
   "draw.title": { zh: "绘图工作区", en: "Drawing Workspace" },
+  "draw.settingsTitle": { zh: "绘图设置", en: "Drawing Settings" },
+  "draw.engine": { zh: "引擎", en: "Engine" },
+  "draw.engineChatModel": {
+    zh: "聊天模型（旧行为，从当前模型推导）",
+    en: "Chat model (legacy: derive from active model)",
+  },
+  "draw.engineOpenai": { zh: "OpenAI 兼容", en: "OpenAI-compatible" },
+  "draw.engineComfyui": { zh: "ComfyUI", en: "ComfyUI" },
+  "draw.engineSdwebui": { zh: "SD WebUI (A1111/Forge)", en: "SD WebUI (A1111/Forge)" },
+  "draw.engineHint": {
+    zh: "ComfyUI / SD WebUI 是本地服务，需先自行启动",
+    en: "ComfyUI / SD WebUI are local services you start yourself",
+  },
+  "draw.baseUrl": { zh: "服务地址", en: "Base URL" },
+  "draw.baseUrlHint": {
+    zh: "服务根地址，如 http://127.0.0.1:8188（ComfyUI）或 http://127.0.0.1:7860（SD WebUI）",
+    en: "Service root, e.g. http://127.0.0.1:8188 (ComfyUI) or http://127.0.0.1:7860 (SD WebUI)",
+  },
+  "draw.apiKey": { zh: "API Key（可空）", en: "API Key (optional)" },
+  "draw.apiKeyHint": { zh: "本地服务通常留空", en: "Usually empty for local services" },
+  "draw.model": { zh: "模型名（可空）", en: "Model (optional)" },
+  "draw.modelHint": {
+    zh: "ComfyUI 留空 = 工作流内指定；SD WebUI 留空 = 当前 checkpoint",
+    en: "ComfyUI: empty = set inside workflow; SD WebUI: empty = current checkpoint",
+  },
+  "draw.prompt": { zh: "提示词", en: "Prompt" },
+  "draw.negative": { zh: "负面提示词", en: "Negative prompt" },
+  "draw.negativePlaceholder": { zh: "不希望出现的元素…", en: "Elements to avoid…" },
+  "draw.size": { zh: "尺寸", en: "Size" },
+  "draw.steps": { zh: "步数", en: "Steps" },
+  "draw.cfg": { zh: "CFG", en: "CFG" },
+  "draw.seed": { zh: "种子", en: "Seed" },
+  "draw.seedHint": { zh: "-1 = 随机", en: "-1 = random" },
+  "draw.sampler": { zh: "采样器", en: "Sampler" },
+  "draw.samplerHint": {
+    zh: "如 euler / Euler a / dpmpp_2m",
+    en: "e.g. euler / Euler a / dpmpp_2m",
+  },
+  "draw.defaults": { zh: "默认出图参数", en: "Default generation parameters" },
+  "draw.workflowJson": { zh: "工作流 JSON", en: "Workflow JSON" },
+  "draw.workflowPlaceholder": {
+    zh: "粘贴 ComfyUI 导出的 API 格式工作流 JSON；留空使用内置默认 txt2img 工作流",
+    en: "Paste an API-format ComfyUI workflow JSON; empty = built-in txt2img workflow",
+  },
+  "draw.workflowHint": {
+    zh: "支持 {{prompt}} / {{negative}} / {{seed}} / {{steps}} / {{width}} / {{height}} / {{model}} 占位符",
+    en: "Supports {{prompt}} / {{negative}} / {{seed}} / {{steps}} / {{width}} / {{height}} / {{model}} placeholders",
+  },
+  "draw.test": { zh: "测试连接", en: "Test Connection" },
+  "draw.testing": { zh: "测试中…", en: "Testing…" },
+  "draw.testOnline": { zh: "✅ 在线", en: "✅ Online" },
+  "draw.testOnlineNoModels": {
+    zh: "⚠️ 服务在线，但未返回模型列表",
+    en: "⚠️ Service online, but no model list returned",
+  },
+  "draw.testOffline": { zh: "❌ 服务未连接", en: "❌ Service offline" },
+  "draw.testFailed": { zh: "❌ 连接失败：", en: "❌ Connection failed: " },
+  "draw.modelsLabel": { zh: "模型", en: "Models" },
+  "draw.samplersLabel": { zh: "采样器", en: "Samplers" },
+  "draw.noModels": { zh: "（未返回模型列表）", en: "(no model list returned)" },
+  "draw.needBaseUrl": { zh: "请先填写服务地址", en: "Enter a base URL first" },
+  "draw.needModel": {
+    zh: "请先在 设置 → 模型 中添加并激活一个模型",
+    en: "Add and activate a model in Settings → Models first",
+  },
+  "draw.guide": { zh: "搭建指引", en: "Setup guide" },
+  "draw.guideComfyDesc": {
+    zh: "ComfyUI（节点式工作流，推荐）",
+    en: "ComfyUI (node-based workflows, recommended)",
+  },
+  "draw.guideSdDesc": { zh: "SD WebUI A1111 / Forge", en: "SD WebUI A1111 / Forge" },
+  "draw.download": { zh: "下载", en: "Download" },
+  "draw.startCommand": { zh: "启动命令", en: "Start command" },
+  "draw.startComfy": {
+    zh: "python main.py --listen 127.0.0.1 --port 8188（Windows 便携包双击 run_nvidia_gpu.bat）",
+    en: "python main.py --listen 127.0.0.1 --port 8188 (portable: run_nvidia_gpu.bat)",
+  },
+  "draw.startSd": {
+    zh: "webui-user.bat 中加入 COMMANDLINE_ARGS=--api --listen --port 7860",
+    en: "Add COMMANDLINE_ARGS=--api --listen --port 7860 to webui-user.bat",
+  },
+  "draw.modelSources": { zh: "模型来源", en: "Model sources" },
+  "draw.guideNote": {
+    zh: "本应用只提供链接与命令示例，不会下载、安装或启动任何服务。",
+    en: "This app only shows links and commands; it never downloads, installs or starts services.",
+  },
   "draw.using": {
     zh: "使用 {name} 的图片生成端点",
     en: "Using {name}'s image generation endpoint",
   },
+  "draw.usingService": { zh: "引擎 {engine} · {url}", en: "Engine {engine} · {url}" },
   "draw.promptPlaceholder": { zh: "描述要生成的图片…", en: "Describe the image to generate…" },
   "draw.resultPlaceholder": {
     zh: "生成结果将显示在这里",
@@ -115,9 +210,10 @@ export const miscMessages: Record<string, Record<string, string>> = {
   "draw.button": { zh: "生成图片", en: "Generate" },
   "draw.busy": { zh: "生成中…", en: "Generating…" },
   "draw.noImage": {
-    zh: "生成接口未返回图片（检查模型是否支持图片生成）",
-    en: "No image returned (does the model support image generation?)",
+    zh: "生成接口未返回图片（检查模型或服务配置）",
+    en: "No image returned (check the model or service config)",
   },
+  "draw.imagesCount": { zh: "已生成 {n} 张", en: "{n} image(s) generated" },
   // ── 双模式(工作 / 酒馆)──
   "appMode.work": { zh: "工作", en: "Work" },
   "appMode.tavern": { zh: "酒馆", en: "Tavern" },
@@ -136,6 +232,7 @@ export const miscMessages: Record<string, Record<string, string>> = {
   "qr.template": { zh: "模板(支持 {{char}}/[roll]/[ask])", en: "Template ({{char}}/[roll]/[ask])" },
   "qr.add": { zh: "添加快捷按钮", en: "Add quick button" },
   "graph.title": { zh: "记忆图谱", en: "Memory Graph" },
+  "graph.close": { zh: "关闭记忆图谱", en: "Close memory graph" },
   "graph.empty": {
     zh: "暂无关系图数据(对话中提及名字/关系句后自动生成)",
     en: "No graph yet (appears as names/relations are mentioned)",

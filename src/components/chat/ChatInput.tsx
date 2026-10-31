@@ -111,9 +111,18 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   const [wrapperPick, setWrapperPick] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionRef = useRef<AtMentionMenuHandle>(null);
+  // T-034: 发送门闩 —— 同步置位（在任何 await 之前），预处理期间拒绝第二次发送。
+  // 用 ref 而不是 state：连续两次 Enter 在同一渲染周期内也能挡住（state 要等重渲染）。
+  const sendingRef = useRef(false);
+  // 预处理期间禁用输入（RAG/rerank/技能工具/斜杠命令）
+  const [sending, setSending] = useState(false);
   // 对话子模式 = 轻量；只认 mode=work，酒馆模式完全不走这条判定
   const isLite = useAppModeStore((s) => s.mode === "work" && s.workSubMode === "chat");
   const isStreaming = useChatStore((s) => s.isStreaming);
+  // 上下文压缩中：该会话禁止发送（store 侧也拒绝，这里是 UI 入口收口）
+  const compressingConvIds = useChatStore((s) => s.compressingConvIds);
+  const activeConvId = useConversationStore((s) => s.activeId);
+  const isCompressing = !!activeConvId && compressingConvIds.includes(activeConvId);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancelGeneration = useChatStore((s) => s.cancelGeneration);
   const regenerate = useChatStore((s) => s.regenerate);
@@ -154,297 +163,317 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
 
   const handleSend = useCallback(async () => {
     const content = input.trim();
-    if (!content || isStreaming) return;
+    // T-034: 门闩必须在任何 await 之前同步置位。旧实现里 RAG/rerank/技能工具
+    // 的 await 都发生在 isStreaming 置位之前，期间可并发进入两条 sendMessage。
+    if (!content || isStreaming || isCompressing || sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const convStore = useConversationStore.getState();
+      // T-034: 预处理开始即钉住目标会话；期间切换 activeId 不会写错会话，
+      // 本轮 systemPrompt 也取自这个会话。
+      const pinnedConvId = convStore.activeId;
 
-    const convStore = useConversationStore.getState();
+      // Slash command (plugin dispatch) — no model required
+      if (content.startsWith("/")) {
+        const [cmdRawRaw, ...rest] = content.slice(1).split(/\s+/);
+        const cmdRaw = cmdRawRaw ?? "";
+        const args = rest.join(" ");
+        setInput("");
+        if (textareaRef.current) textareaRef.current.style.height = "auto";
 
-    // Slash command (plugin dispatch) — no model required
-    if (content.startsWith("/")) {
-      const [cmdRawRaw, ...rest] = content.slice(1).split(/\s+/);
-      const cmdRaw = cmdRawRaw ?? "";
-      const args = rest.join(" ");
-      setInput("");
-      if (textareaRef.current) textareaRef.current.style.height = "auto";
+        let convId = convStore.activeId;
+        if (!convId) {
+          const conv = await convStore.create();
+          convId = conv.id;
+        }
 
-      let convId = convStore.activeId;
-      if (!convId) {
-        const conv = await convStore.create();
-        convId = conv.id;
-      }
+        const userMsg = {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          content,
+          timestamp: new Date().toISOString(),
+        };
+        await convStore.addMessage(convId, userMsg);
 
-      const userMsg = {
-        id: crypto.randomUUID(),
-        role: "user" as const,
-        content,
-        timestamp: new Date().toISOString(),
-      };
-      await convStore.addMessage(convId, userMsg);
+        let result: string | null = null;
 
-      let result: string | null = null;
+        // 工具调用阶段化状态(工具阶段状态):初始化→调用中→读取结果→完成,
+        // 在输入区上方显示当前阶段,避免长工具调用看起来像卡死
+        const setStage = (stage: string) =>
+          setToolStatus({ server: cmdRaw, tool: stage.split(" ")[0] || cmdRaw, stage });
 
-      // 工具调用阶段化状态(工具阶段状态):初始化→调用中→读取结果→完成,
-      // 在输入区上方显示当前阶段,避免长工具调用看起来像卡死
-      const setStage = (stage: string) =>
-        setToolStatus({ server: cmdRaw, tool: stage.split(" ")[0] || cmdRaw, stage });
-
-      // MCP tool chain: /mcp <server> <tool> [argsJson] :: <tool2> [argsJson] :: ...
-      // 步骤解析与顺序执行已抽到 ./mcp-step.ts 的 runMcpChain
-      if (cmdRaw.toLowerCase() === "mcp") {
-        if (args) {
-          try {
-            if (isLite) {
-              // 对话模式：只放行 mcpListLiteTools() 白名单内的 (server.id, tool)。
-              // 白名单为空 → 每一步都被拒绝并返回明确说明，且不发起 MCP IPC。
-              const allowStep = createLiteAllowStep(await mcpListLiteTools());
-              result = await runMcpChain(args, setStage, allowStep);
-            } else {
-              result = await runMcpChain(args, setStage);
+        // MCP tool chain: /mcp <server> <tool> [argsJson] :: <tool2> [argsJson] :: ...
+        // 步骤解析与顺序执行已抽到 ./mcp-step.ts 的 runMcpChain
+        if (cmdRaw.toLowerCase() === "mcp") {
+          if (args) {
+            try {
+              if (isLite) {
+                // 对话模式：只放行 mcpListLiteTools() 白名单内的 (server.id, tool)。
+                // 白名单为空 → 每一步都被拒绝并返回明确说明，且不发起 MCP IPC。
+                const allowStep = createLiteAllowStep(await mcpListLiteTools());
+                result = await runMcpChain(args, setStage, allowStep);
+              } else {
+                result = await runMcpChain(args, setStage);
+              }
+            } catch (e) {
+              result = `${t("chat.mcpCallFailed")}${e}`;
+            } finally {
+              setToolStatus(null);
             }
-          } catch (e) {
-            result = `${t("chat.mcpCallFailed")}${e}`;
+          } else {
+            result = t("chat.mcpUsage");
+          }
+        }
+
+        if (result === null) {
+          setStage(t("tool.calling"));
+          try {
+            result = await pluginAPI.executeCommand(cmdRaw.toLowerCase(), args);
           } finally {
             setToolStatus(null);
           }
+        }
+
+        if (result != null) {
+          const asmMsg = {
+            id: crypto.randomUUID(),
+            role: "assistant" as const,
+            content: result,
+            timestamp: new Date().toISOString(),
+          };
+          await convStore.addMessage(convId, asmMsg);
         } else {
-          result = t("chat.mcpUsage");
+          await convStore.addMessage(convId, {
+            id: crypto.randomUUID(),
+            role: "assistant" as const,
+            content: t("chat.unknownCmd", {
+              cmd: cmdRaw,
+              list: SLASH_COMMANDS.map((c) => "/" + c.cmd).join("、"),
+            }),
+            timestamp: new Date().toISOString(),
+          });
         }
+        return;
       }
 
-      if (result === null) {
-        setStage(t("tool.calling"));
+      if (!model) return;
+
+      setInput("");
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+      // Build RAG context if enabled(结构化检索:候选片段 + rerank 重排 + 来源卡)
+      // 知识库在对话子模式同样可用（能力矩阵：两种子模式都保留 RAG）
+      let knowledgeContext: string | undefined;
+      let sources: RagResult[] = [];
+      if (ragEnabled && activeBaseId) {
         try {
-          result = await pluginAPI.executeCommand(cmdRaw.toLowerCase(), args);
-        } finally {
-          setToolStatus(null);
-        }
-      }
-
-      if (result != null) {
-        const asmMsg = {
-          id: crypto.randomUUID(),
-          role: "assistant" as const,
-          content: result,
-          timestamp: new Date().toISOString(),
-        };
-        await convStore.addMessage(convId, asmMsg);
-      } else {
-        await convStore.addMessage(convId, {
-          id: crypto.randomUUID(),
-          role: "assistant" as const,
-          content: t("chat.unknownCmd", {
-            cmd: cmdRaw,
-            list: SLASH_COMMANDS.map((c) => "/" + c.cmd).join("、"),
-          }),
-          timestamp: new Date().toISOString(),
-        });
-      }
-      return;
-    }
-
-    if (!model) return;
-
-    setInput("");
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
-
-    // Build RAG context if enabled(结构化检索:候选片段 + rerank 重排 + 来源卡)
-    // 知识库在对话子模式同样可用（能力矩阵：两种子模式都保留 RAG）
-    let knowledgeContext: string | undefined;
-    let sources: RagResult[] = [];
-    if (ragEnabled && activeBaseId) {
-      try {
-        // 1) 结构化检索(hybrid = BM25 + 向量 + RRF;mode 切换走双模式分流)
-        sources = await ragSearch(content, { kbId: activeBaseId, topK: 5, mode: ragMode });
-        // 2) LLM rerank:候选 top-5 交给当前模型按相关性重排(费 token,可选)
-        if (ragRerankEnabled && sources.length > 1) {
-          try {
-            const order = await ragRerank(
-              content,
-              sources.map((s) => s.content),
-              { api_url: model.api_url, api_key: model.api_key, model: model.model }
-            );
-            if (order.length > 0) {
-              const byOrder = order
-                .map((i) => sources[i])
-                .filter((s): s is RagResult => !!s)
-                .concat(sources.filter((_, i) => !order.includes(i)));
-              sources = byOrder.slice(0, 5);
+          // 1) 结构化检索(hybrid = BM25 + 向量 + RRF;mode 切换走双模式分流)
+          sources = await ragSearch(content, { kbId: activeBaseId, topK: 5, mode: ragMode });
+          // 2) LLM rerank:候选 top-5 交给当前模型按相关性重排(费 token,可选)
+          if (ragRerankEnabled && sources.length > 1) {
+            try {
+              const order = await ragRerank(
+                content,
+                sources.map((s) => s.content),
+                { api_url: model.api_url, api_key: model.api_key, model: model.model }
+              );
+              if (order.length > 0) {
+                const byOrder = order
+                  .map((i) => sources[i])
+                  .filter((s): s is RagResult => !!s)
+                  .concat(sources.filter((_, i) => !order.includes(i)));
+                sources = byOrder.slice(0, 5);
+              }
+            } catch {
+              /* rerank 失败静默,用原始顺序 */
             }
-          } catch {
-            /* rerank 失败静默,用原始顺序 */
           }
-        }
-        // 3) 拼上下文(片段内容,来源信息在发送后以来源卡展示)
-        knowledgeContext = sources
-          .map((s) => s.content)
-          .join("\n\n---\n\n")
-          .slice(0, 9000);
-      } catch (e: unknown) {
-        // 知识库注入整体失败，会让用户以为「这次带了知识」其实没带 —— 必须留痕
-        logDiag(`knowledge inject failed: ${String(e)}`);
-      }
-    }
-    setLastSources(sources);
-
-    // Prepend quoted message (Chatbox Message Quoting) as markdown blockquote
-    let finalContent = content;
-    if (quoted?.content) {
-      const quoteText = quoted.content.replace(/\n/g, "\n> ").slice(0, 600);
-      const who = quoted.model
-        ? `${quoted.model}`
-        : quoted.role === "user"
-          ? t("chat.quoteUser")
-          : t("chat.quoteAI");
-      finalContent = `> **${t("chat.quoteBy", { who })}**：\n> ${quoteText}\n\n${content}`;
-    }
-    onClearQuote?.();
-
-    // 三层指令作用域(全局 < 项目/知识库 < 会话):合并后作为 systemPrompt 基础
-    // 对话子模式：技能仅 lite_enabled 可用，项目指令不应用
-    // （全局指令/会话提示词属于用户既有上下文，保留）
-    const activeSkill = isLite ? (skill && skill.lite_enabled ? skill : null) : skill;
-    const activeConv = convStore.getActive();
-    const settingsState = useSettingsStore.getState();
-    let systemPrompt = activeSkill?.systemPrompt || activeConv?.system_prompt || undefined;
-    // 会话级系统提示词优先,否则按作用域合并:全局指令 + 命中当前知识库的项目指令
-    if (!systemPrompt) {
-      const scoped: string[] = [];
-      if (settingsState.globalInstruction.trim()) {
-        scoped.push(settingsState.globalInstruction.trim());
-      }
-      if (!isLite) {
-        const proj = settingsState.projectInstructions.filter(
-          (p) => !p.kbId || p.kbId === activeBaseId
-        );
-        for (const p of proj) {
-          if (p.instruction.trim()) scoped.push(p.instruction.trim());
+          // 3) 拼上下文(片段内容,来源信息在发送后以来源卡展示)
+          knowledgeContext = sources
+            .map((s) => s.content)
+            .join("\n\n---\n\n")
+            .slice(0, 9000);
+        } catch (e: unknown) {
+          // 知识库注入整体失败，会让用户以为「这次带了知识」其实没带 —— 必须留痕
+          logDiag(`knowledge inject failed: ${String(e)}`);
         }
       }
-      if (scoped.length > 0) systemPrompt = scoped.join("\n\n");
-    }
+      setLastSources(sources);
 
-    // Agent 记忆：技能绑定的记忆标签 → 注入长期记忆（稳定前缀，缓存友好）
-    if (activeSkill) {
-      const memText = useMemoryStore
-        .getState()
-        .byTags(JSON.parse(activeSkill.memory_tags || "[]") as string[]);
-      if (memText) {
-        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memText}` : memText;
+      // Prepend quoted message (Chatbox Message Quoting) as markdown blockquote
+      let finalContent = content;
+      if (quoted?.content) {
+        const quoteText = quoted.content.replace(/\n/g, "\n> ").slice(0, 600);
+        const who = quoted.model
+          ? `${quoted.model}`
+          : quoted.role === "user"
+            ? t("chat.quoteUser")
+            : t("chat.quoteAI");
+        finalContent = `> **${t("chat.quoteBy", { who })}**：\n> ${quoteText}\n\n${content}`;
       }
-    }
+      onClearQuote?.();
 
-    // Agent 工具：技能绑定的 MCP 工具（tools_json = ["server/tool", ...]）→ 真实调用，
-    // 结果注入 systemPrompt（此前 tools_json 从不执行，绑定工具是死字段）
-    if (activeSkill?.tools_json) {
-      try {
-        // 对话模式：技能绑定的工具同样受白名单约束（按 server.id 匹配）。
-        // 白名单拉取失败按「全拒」处理 —— fail-closed，宁可不调也不越权。
-        let allowStep: AllowStep | undefined;
-        if (isLite) {
-          try {
-            allowStep = createLiteAllowStep(await mcpListLiteTools());
-          } catch {
-            allowStep = () => false;
-          }
+      // 三层指令作用域(全局 < 项目/知识库 < 会话):合并后作为 systemPrompt 基础
+      // 对话子模式：技能仅 lite_enabled 可用，项目指令不应用
+      // （全局指令/会话提示词属于用户既有上下文，保留）
+      const activeSkill = isLite ? (skill && skill.lite_enabled ? skill : null) : skill;
+      // T-034: 会话级提示词也按钉住的会话取 —— 预处理期间切走不能换掉本轮人设。
+      const liveConvStore = useConversationStore.getState();
+      const activeConv = pinnedConvId
+        ? (liveConvStore.allConversations.find((c) => c.id === pinnedConvId) ??
+          liveConvStore.conversations.find((c) => c.id === pinnedConvId))
+        : liveConvStore.getActive();
+      const settingsState = useSettingsStore.getState();
+      let systemPrompt = activeSkill?.systemPrompt || activeConv?.system_prompt || undefined;
+      // 会话级系统提示词优先,否则按作用域合并:全局指令 + 命中当前知识库的项目指令
+      if (!systemPrompt) {
+        const scoped: string[] = [];
+        if (settingsState.globalInstruction.trim()) {
+          scoped.push(settingsState.globalInstruction.trim());
         }
-        const toolRefs = JSON.parse(activeSkill.tools_json) as string[];
-        const servers = await mcpListServers();
-        const outputs: string[] = [];
-        let prev = "";
-        for (const ref of toolRefs) {
-          const [serverName, toolName] = ref.split("/");
-          const server = servers.find(
-            (s) => s.name === (serverName || "").trim() || s.id === (serverName || "").trim()
+        if (!isLite) {
+          const proj = settingsState.projectInstructions.filter(
+            (p) => !p.kbId || p.kbId === activeBaseId
           );
-          if (!server || !toolName) continue;
-          try {
-            const out = await runMcpStep(server, toolName.trim(), "", prev, allowStep);
-            outputs.push(`【工具 ${server.name}/${toolName.trim()}】\n${out}`);
-            prev = out;
-          } catch (e) {
-            outputs.push(`【工具 ${server.name}/${toolName.trim()}】调用失败: ${e}`);
+          for (const p of proj) {
+            if (p.instruction.trim()) scoped.push(p.instruction.trim());
           }
         }
-        if (outputs.length > 0) {
-          const toolCtx = outputs.join("\n\n");
-          systemPrompt = systemPrompt
-            ? `${systemPrompt}\n\n【工具调用结果】\n${toolCtx}`
-            : `【工具调用结果】\n${toolCtx}`;
+        if (scoped.length > 0) systemPrompt = scoped.join("\n\n");
+      }
+
+      // Agent 记忆：技能绑定的记忆标签 → 注入长期记忆（稳定前缀，缓存友好）
+      if (activeSkill) {
+        const memText = useMemoryStore
+          .getState()
+          .byTags(JSON.parse(activeSkill.memory_tags || "[]") as string[]);
+        if (memText) {
+          systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memText}` : memText;
         }
-      } catch {
-        /* tools_json 解析失败静默,不影响发送 */
       }
-    }
 
-    // @ 旧会话上下文(自动压缩):选择会话后,发送时拉取其最近消息作为上下文
-    if (convMentions.length > 0) {
-      const convs = convStore.conversations;
-      const parts: string[] = [];
-      for (const m of convMentions) {
-        const c = convs.find((x) => x.id === m.id);
-        if (!c) continue;
-        // 自动压缩:最多取最近 8 条,每条截断 300 字(超出上下文上限不硬塞)
-        const snippet = c.messages
-          .slice(-8)
-          .map((mm) => `${mm.role === "user" ? "用户" : "AI"}：${mm.content.slice(0, 300)}`)
-          .join("\n");
-        parts.push(`【引用会话 ${m.name}】\n${snippet}`);
+      // Agent 工具：技能绑定的 MCP 工具（tools_json = ["server/tool", ...]）→ 真实调用，
+      // 结果注入 systemPrompt（此前 tools_json 从不执行，绑定工具是死字段）
+      if (activeSkill?.tools_json) {
+        try {
+          // 对话模式：技能绑定的工具同样受白名单约束（按 server.id 匹配）。
+          // 白名单拉取失败按「全拒」处理 —— fail-closed，宁可不调也不越权。
+          let allowStep: AllowStep | undefined;
+          if (isLite) {
+            try {
+              allowStep = createLiteAllowStep(await mcpListLiteTools());
+            } catch {
+              allowStep = () => false;
+            }
+          }
+          const toolRefs = JSON.parse(activeSkill.tools_json) as string[];
+          const servers = await mcpListServers();
+          const outputs: string[] = [];
+          let prev = "";
+          for (const ref of toolRefs) {
+            const [serverName, toolName] = ref.split("/");
+            const server = servers.find(
+              (s) => s.name === (serverName || "").trim() || s.id === (serverName || "").trim()
+            );
+            if (!server || !toolName) continue;
+            try {
+              const out = await runMcpStep(server, toolName.trim(), "", prev, allowStep);
+              outputs.push(`【工具 ${server.name}/${toolName.trim()}】\n${out}`);
+              prev = out;
+            } catch (e) {
+              outputs.push(`【工具 ${server.name}/${toolName.trim()}】调用失败: ${e}`);
+            }
+          }
+          if (outputs.length > 0) {
+            const toolCtx = outputs.join("\n\n");
+            systemPrompt = systemPrompt
+              ? `${systemPrompt}\n\n【工具调用结果】\n${toolCtx}`
+              : `【工具调用结果】\n${toolCtx}`;
+          }
+        } catch {
+          /* tools_json 解析失败静默,不影响发送 */
+        }
       }
-      if (parts.length > 0) {
-        const refText = parts.join("\n\n");
-        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${refText}` : refText;
+
+      // @ 旧会话上下文(自动压缩):选择会话后,发送时拉取其最近消息作为上下文
+      if (convMentions.length > 0) {
+        const convs = convStore.conversations;
+        const parts: string[] = [];
+        for (const m of convMentions) {
+          const c = convs.find((x) => x.id === m.id);
+          if (!c) continue;
+          // 自动压缩:最多取最近 8 条,每条截断 300 字(超出上下文上限不硬塞)
+          const snippet = c.messages
+            .slice(-8)
+            .map((mm) => `${mm.role === "user" ? "用户" : "AI"}：${mm.content.slice(0, 300)}`)
+            .join("\n");
+          parts.push(`【引用会话 ${m.name}】\n${snippet}`);
+        }
+        if (parts.length > 0) {
+          const refText = parts.join("\n\n");
+          systemPrompt = systemPrompt ? `${systemPrompt}\n\n${refText}` : refText;
+        }
       }
-    }
 
-    // 角色扮演会话:三段式在 useChatStore.sendMessage 内组装(DeepSeek 缓存核心——
-    // stableSystem 前缀恒定、世界书/摘要尾部),这里只保留基础提示词(技能/记忆/会话 prompt)
-    void activeConv?.character_id;
+      // 角色扮演会话:三段式在 useChatStore.sendMessage 内组装(DeepSeek 缓存核心——
+      // stableSystem 前缀恒定、世界书/摘要尾部),这里只保留基础提示词(技能/记忆/会话 prompt)
+      void activeConv?.character_id;
 
-    // 对话子模式无多模型对比能力：只发当前模型
-    let targetModels = isLite
-      ? [
-          {
-            name: model.name,
-            api_url: model.api_url,
-            api_key: model.api_key,
-            model: model.model,
-          },
-        ]
-      : [
-          model,
-          ...compareList.map((m) => ({
-            name: m.name,
-            api_url: m.api_url,
-            api_key: m.api_key,
-            model: m.model,
-          })),
-        ];
-    // A skill can pin a specific model; otherwise send to active + compare models
-    if (activeSkill?.model) {
-      const pinned = models.find((m) => m.name === activeSkill.model);
-      if (pinned)
-        targetModels = [
-          {
-            name: pinned.name,
-            api_url: pinned.api_url,
-            api_key: pinned.api_key,
-            model: pinned.model,
-          },
-        ];
-    }
-    // F2: 技能可覆写温度（如「严谨代码」用低温）——发送时注入目标模型配置
-    if (activeSkill?.temperature != null) {
-      targetModels = targetModels.map((m) => ({
-        ...m,
-        temperature: activeSkill.temperature as number,
-      }));
-    }
+      // 对话子模式无多模型对比能力：只发当前模型
+      let targetModels = isLite
+        ? [
+            {
+              name: model.name,
+              api_url: model.api_url,
+              api_key: model.api_key,
+              model: model.model,
+            },
+          ]
+        : [
+            model,
+            ...compareList.map((m) => ({
+              name: m.name,
+              api_url: m.api_url,
+              api_key: m.api_key,
+              model: m.model,
+            })),
+          ];
+      // A skill can pin a specific model; otherwise send to active + compare models
+      if (activeSkill?.model) {
+        const pinned = models.find((m) => m.name === activeSkill.model);
+        if (pinned)
+          targetModels = [
+            {
+              name: pinned.name,
+              api_url: pinned.api_url,
+              api_key: pinned.api_key,
+              model: pinned.model,
+            },
+          ];
+      }
+      // F2: 技能可覆写温度（如「严谨代码」用低温）——发送时注入目标模型配置
+      if (activeSkill?.temperature != null) {
+        targetModels = targetModels.map((m) => ({
+          ...m,
+          temperature: activeSkill.temperature as number,
+        }));
+      }
 
-    await sendMessage(finalContent, targetModels, systemPrompt, knowledgeContext);
-    setSkill(null); // skills apply to a single message
-    setConvMentions([]); // @ 会话引用单次生效
+      // T-034: 显式传入钉住的 convId；缺省（无会话）时 sendMessage 自行创建。
+      await sendMessage(finalContent, targetModels, systemPrompt, knowledgeContext, {
+        convId: pinnedConvId ?? undefined,
+      });
+      setSkill(null); // skills apply to a single message
+      setConvMentions([]); // @ 会话引用单次生效
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
   }, [
     input,
     isStreaming,
+    isCompressing,
     model,
     sendMessage,
     ragEnabled,
@@ -561,26 +590,27 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
   );
   const handleRunChain = useCallback(
     async (chain: PromptChain) => {
-      if (!input.trim() || !model) return;
+      if (!input.trim() || !model || sendingRef.current) return;
       const initial = input.trim();
+      // T-034: 整条链钉住同一个会话，并占用同一个发送门闩。
+      const pinnedConvId = useConversationStore.getState().activeId;
+      sendingRef.current = true;
+      setSending(true);
       setInput("");
       setChainPick(null);
       setChainRunning(true);
       try {
-        const lastContent = () => {
-          const c = useConversationStore.getState().getActive();
-          const asm = [...(c?.messages || [])].reverse().find((m) => m.role === "assistant");
-          return asm?.content || "";
-        };
-        await runPromptChain(
-          chain,
-          initial,
-          (content) => sendMessage(content, [model], undefined, undefined),
-          lastContent
+        // T-021: send 直接返回该步最终正文（已落库），不再回读最后一条 assistant。
+        await runPromptChain(chain, initial, (content) =>
+          sendMessage(content, [model], undefined, undefined, {
+            convId: pinnedConvId ?? undefined,
+          })
         );
       } catch (e) {
         logDiag(`Prompt chain error: ${String(e)}`);
       } finally {
+        sendingRef.current = false;
+        setSending(false);
         setChainRunning(false);
       }
     },
@@ -743,7 +773,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
             onInput={handleInput}
             placeholder={ph}
             rows={1}
-            disabled={!model || isStreaming}
+            disabled={!model || isStreaming || isCompressing || sending}
             className="w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           />
         </div>
@@ -823,15 +853,15 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
               )}
               <button
                 onClick={() => useChatStore.getState().compressContext()}
-                disabled={!model}
+                disabled={!model || isCompressing}
                 className="p-2 rounded-md border border-input bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
                 title={t("chat.compress")}
               >
                 <FileText className="w-4 h-4" />
               </button>
               <button
-                onClick={regenerate}
-                disabled={!model}
+                onClick={() => regenerate()}
+                disabled={!model || isCompressing}
                 className="p-2 rounded-md border border-input bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
                 title={t("chat.regenerate")}
               >
@@ -839,7 +869,7 @@ export function ChatInput({ quoted, onClearQuote }: Props) {
               </button>
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || !model}
+                disabled={!input.trim() || !model || isCompressing || sending}
                 className="p-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
                 title={t("chat.sendTitle")}
               >

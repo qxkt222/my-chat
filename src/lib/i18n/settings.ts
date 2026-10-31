@@ -1,5 +1,5 @@
 // lib/i18n/settings.ts — 由 i18n.ts 按 key 前缀拆出（自动生成，勿手工搬运 key）
-// 条目数：217
+// 条目数：218
 
 export const settingsMessages: Record<string, Record<string, string>> = {
   // ── Settings ──
@@ -22,8 +22,10 @@ export const settingsMessages: Record<string, Record<string, string>> = {
   "settings.characters": { zh: "角色", en: "Characters" },
   "settings.lore": { zh: "世界书", en: "Lorebook" },
   "settings.translate": { zh: "翻译", en: "Translate" },
+  "settings.drawing": { zh: "绘图", en: "Drawing" },
   "settings.presets": { zh: "预设", en: "Presets" },
   "settings.save": { zh: "保存", en: "Save" },
+  "settings.saveFailed": { zh: "保存失败，请重试。", en: "Save failed. Please retry." },
   "settings.cancel": { zh: "取消", en: "Cancel" },
   "settings.stoppingStrings": { zh: "停止字符串", en: "Stopping Strings" },
   "settings.stoppingStringsHint": {

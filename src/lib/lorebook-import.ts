@@ -6,6 +6,7 @@
 //  - 旧版:{entries} 条目字段 key(单数)/keys(数组)均兼容
 
 import type { CharacterBook, LoreEntry } from "@/types";
+import { normalizeSecondaryKeys } from "./character-card";
 
 function normalizeEntry(e: Record<string, unknown>): LoreEntry | null {
   const keysRaw = (e.keys as unknown[] | undefined) ?? (e.key ? [e.key] : []);
@@ -17,9 +18,8 @@ function normalizeEntry(e: Record<string, unknown>): LoreEntry | null {
   const disabled = e.disable === true || e.enabled === false;
   return {
     keys,
-    keyssecondary: Array.isArray(e.keyssecondary)
-      ? (e.keyssecondary as unknown[]).map(String)
-      : undefined,
+    // 兼容 secondary_keys(酒馆 V2)/ keysecondary(旧导出),统一存内部 keyssecondary
+    keyssecondary: normalizeSecondaryKeys(e),
     content,
     constant: e.constant === true,
     selective: e.selective === true,

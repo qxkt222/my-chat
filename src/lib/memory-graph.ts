@@ -57,6 +57,20 @@ const RELATION_WORDS = [
   "同伴",
 ];
 
+/** 关系句固定部分：A + 连接词 + B + 可选「的/是」+ 关系词 */
+const RELATION_TEMPLATE =
+  '[「『""]?([\\u4e00-\\u9fffA-Za-z]{2,8})[」』""]?(?:是|与|和|跟)(?:[「『""]?)([\\u4e00-\\u9fffA-Za-z]{2,8})(?:[」』""])?(?:的|是)?';
+
+/**
+ * T-140：关系正则只在模块加载时预编译一次。
+ * 之前是每条消息 × 18 个关系词现场 new RegExp，消息越多构造开销越大。
+ * 另加「关系词不在正文里就跳过该正则」的快筛，省掉无效全文扫描。
+ */
+const RELATION_PATTERNS = RELATION_WORDS.map((rel) => ({
+  rel,
+  re: new RegExp(`${RELATION_TEMPLATE}${rel}`, "g"),
+}));
+
 /** 从会话消息 + 世界书提取关系图(轻量启发式:名字提及计数 + 关系句模式) */
 export function extractGraph(
   messages: { id: string; role: string; content: string }[],
@@ -92,11 +106,9 @@ export function extractGraph(
       }
     }
     // 关系句: "A 是 B 的 X" / "A 与 B 是 X"
-    for (const rel of RELATION_WORDS) {
-      const re = new RegExp(
-        `[「『""]?([\\u4e00-\\u9fffA-Za-z]{2,8})[」』""]?(?:是|与|和|跟)(?:[「『""]?)([\\u4e00-\\u9fffA-Za-z]{2,8})(?:[」』""])?(?:的|是)?${rel}`,
-        "g"
-      );
+    for (const { rel, re } of RELATION_PATTERNS) {
+      // 快筛:关系词不在正文里，正则不可能命中，直接跳过
+      if (!text.includes(rel)) continue;
       const ms = text.matchAll(re);
       for (const hit of ms) {
         const a = (hit[1] ?? "").trim();

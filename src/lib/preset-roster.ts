@@ -6,11 +6,16 @@
 // 与角色无关（角色只管自己的 system_prompt 与世界书）。
 //
 // 设计要点：
-//   · 全纯函数，不读全局状态、不落盘 —— 便于单测钉死行为。
+//   · 函数不落盘，单测可直接钉死行为。唯一的模块级状态是「当前名册索引」
+//     的登记（见 registerRosterIndex）：生产入口只拿到 presets 数组、拿不到
+//     索引，而包顺序（groupOrder）必须参与拼装才不会跨重启漂移。
 //   · 「已启用」只认 `=== true`：旧数据（34 个已落盘 JSON）没有这个键，
 //     真值判断会把它们全当成启用，一下把 6.5 万字的「默认组合」默认开上。
 //   · order 缺失/重复时排序必须**稳定**：拼装顺序直接决定 DeepSeek 缓存前缀，
 //     顺序一抖缓存就失效（界面上看不出来，只是变慢变贵）。
+//   · 跨包顺序不能靠入参数组下标：每个导入包的 order 都从 0 开始，跨包必然
+//     重复；入参数组在会话内是导入顺序、重启后是 listDir 顺序（文件名是随机
+//     UUID）。故拼装先按 groupOrder/包名分组，再在组内按 order 排。
 
 import type { PromptPreset, PresetRosterIndex } from "@/types";
 
@@ -37,29 +42,89 @@ export function groupOf(p: Pick<PromptPreset, "group">): string {
 }
 
 /**
- * 稳定排序：先按 order 升序，order 相同则保持入参相对顺序（Array.sort 在
- * 现代引擎里已是稳定排序，这里显式写明依赖它，并用 id 兜底避免误读）。
+ * 组内稳定排序：先按 order 升序；order 相同用 id 兜底（不是入参下标）。
+ *
+ * 为什么不是入参下标：入参数组重启前后顺序不同（listDir 未排序），同 order
+ * 的条目若按入参相对顺序排列，跨重启就会换位 —— 正好破坏缓存前缀。
+ * id 是落盘的一部分，跨重启恒定；同一包内导入条目的 order 本就互不相同，
+ * 这里只是给手工数据/旧数据一个确定性的兜底。
  */
-function sortStable(list: PromptPreset[]): PromptPreset[] {
-  return [...list]
-    .map((p, i) => ({ p, i }))
-    .sort((a, b) => {
-      const d = orderOf(a.p) - orderOf(b.p);
-      return d !== 0 ? d : a.i - b.i;
-    })
-    .map((x) => x.p);
+function sortByOrderThenId(list: PromptPreset[]): PromptPreset[] {
+  return [...list].sort((a, b) => {
+    const d = orderOf(a) - orderOf(b);
+    if (d !== 0) return d;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
 }
 
 /**
- * 拼装名册：取出所有**已启用**条目，按 order 升序拼接成最终提示词基座。
- * 全未启用时返回空串 —— 调用方据此回退到角色卡绑定的单套预设。
+ * 跨组顺序：先按 groupOrder 声明序，未声明的包名按码点字典序；
+ * UNGROUPED（内置/自定义）恒定最后 —— 与 UI 的分区顺序同口径。
+ * 码点比较（而非 localeCompare）是为了跨机器/跨 locale 逐字一致。
  */
-export function assembleRoster(presets: PromptPreset[]): string {
-  const enabled = sortStable(presets.filter(isEntryEnabled));
-  return enabled
-    .map((p) => p.template.trim())
-    .filter((t) => t.length > 0)
-    .join("\n\n");
+function orderedGroupKeys(keys: string[], declared: string[]): string[] {
+  const rank = new Map<string, number>();
+  declared.forEach((k, i) => {
+    if (!rank.has(k)) rank.set(k, i);
+  });
+  return keys.sort((a, b) => {
+    if (a === UNGROUPED || b === UNGROUPED) {
+      return a === b ? 0 : a === UNGROUPED ? 1 : -1;
+    }
+    const ra = rank.get(a);
+    const rb = rank.get(b);
+    if (ra !== undefined || rb !== undefined) {
+      return (ra ?? declared.length) - (rb ?? declared.length);
+    }
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+/**
+ * 生产路径的「当前名册索引」。store 在载入/更新索引后登记它。
+ *
+ * 拼装入口（rp-prompt）只拿到 presets 数组、拿不到索引，而 groupOrder 是
+ * 全局索引的一部分 —— 不登记它，UI 的包顺序就永远参与不了拼装。
+ * assembleRoster 显式传入 index 时以参数为准，单测/纯调用不受此状态影响。
+ */
+let registeredIndex: PresetRosterIndex | null = null;
+
+/** 登记全局名册索引（store 载入/移动包后调用；传 null 表示清空）。 */
+export function registerRosterIndex(index: PresetRosterIndex | null): void {
+  registeredIndex = index;
+}
+
+/**
+ * 拼装名册：取出所有**已启用**条目，按「包 → 包内 order」拼接成最终提示词基座。
+ * 全未启用时返回空串 —— 调用方据此回退到角色卡绑定的单套预设。
+ *
+ * 包顺序：groupOrder 声明序 → 未声明包按包名字典序 → UNGROUPED 最后。
+ * 包内顺序：order 升序，同 order 按 id 兜底。两者都与入参数组顺序无关，
+ * 所以重启后 listDir 乱序不会改变拼出的 system 前缀。
+ *
+ * @param index 显式索引；省略时用 registerRosterIndex 登记的全局索引。
+ */
+export function assembleRoster(presets: PromptPreset[], index?: PresetRosterIndex | null): string {
+  const declared = (index === undefined ? registeredIndex : index)?.groupOrder ?? [];
+
+  const buckets = new Map<string, PromptPreset[]>();
+  for (const p of presets) {
+    if (!isEntryEnabled(p)) continue;
+    const g = groupOf(p);
+    const arr = buckets.get(g);
+    if (arr) arr.push(p);
+    else buckets.set(g, [p]);
+  }
+  if (buckets.size === 0) return "";
+
+  const out: string[] = [];
+  for (const k of orderedGroupKeys([...buckets.keys()], declared)) {
+    for (const p of sortByOrderThenId(buckets.get(k) ?? [])) {
+      const t = p.template.trim();
+      if (t.length > 0) out.push(t);
+    }
+  }
+  return out.join("\n\n");
 }
 
 /** 字数（与 UI 显示、预算比较同口径：按字符数，不估 token） */
@@ -106,20 +171,9 @@ export function splitByGroup(
   }
 
   const declared = index?.groupOrder ?? [];
-  const keys = [...buckets.keys()].filter((k) => k !== UNGROUPED);
-  keys.sort((a, b) => {
-    const ia = declared.indexOf(a);
-    const ib = declared.indexOf(b);
-    if (ia !== -1 || ib !== -1) {
-      // 声明过的优先，未声明的排在声明过的之后
-      return (ia === -1 ? declared.length : ia) - (ib === -1 ? declared.length : ib);
-    }
-    return a.localeCompare(b);
-  });
-
-  const ordered = buckets.has(UNGROUPED) ? [...keys, UNGROUPED] : keys;
+  const ordered = orderedGroupKeys([...buckets.keys()], declared);
   return ordered.map((k) => {
-    const entries = sortStable(buckets.get(k) ?? []);
+    const entries = sortByOrderThenId(buckets.get(k) ?? []);
     return {
       key: k,
       label: k === UNGROUPED ? UNGROUPED_LABEL : k,

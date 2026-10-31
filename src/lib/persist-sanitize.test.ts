@@ -1,6 +1,8 @@
 // lib/persist-sanitize.test.ts — 持久化边界的运行时校验（坏 JSON 结构不白屏）
 import { describe, it, expect } from "vitest";
 import {
+  normalizeRegexFlags,
+  sanitizeApiTemplate,
   sanitizeRegexRule,
   sanitizeRegexRules,
   sanitizeBudgetConfig,
@@ -65,6 +67,36 @@ describe("sanitizeRegexRule", () => {
 
   it("非数组输入返回空数组", () => {
     expect(sanitizeRegexRules({ x: 1 })).toEqual([]);
+  });
+});
+
+// ── T-141:flags 归一化（u/v 互斥）──────────────────────────────────
+describe("normalizeRegexFlags（T-141）", () => {
+  it("重复标志去重", () => {
+    expect(normalizeRegexFlags("ggii")).toBe("gi");
+    expect(normalizeRegexFlags("g")).toBe("g");
+  });
+
+  it("u 与 v 互斥：同时出现时整体丢弃（compileRegex 否则返回 null、规则静默失效）", () => {
+    expect(normalizeRegexFlags("uv")).toBeUndefined();
+    expect(normalizeRegexFlags("gviu")).toBeUndefined();
+    expect(sanitizeRegexRule({ id: "a", flags: "gvu" }).flags).toBeUndefined();
+  });
+
+  it("单独 u 或单独 v 保留", () => {
+    expect(normalizeRegexFlags("gu")).toBe("gu");
+    expect(normalizeRegexFlags("gv")).toBe("gv");
+  });
+
+  it("非法字符整体丢弃", () => {
+    expect(normalizeRegexFlags("gx")).toBeUndefined();
+    expect(normalizeRegexFlags("")).toBeUndefined();
+    expect(normalizeRegexFlags(123)).toBeUndefined();
+  });
+
+  it("清洗结果幂等（重启前后一致）", () => {
+    const once = normalizeRegexFlags("ggiiu");
+    expect(normalizeRegexFlags(once)).toBe(once);
   });
 });
 
@@ -191,6 +223,78 @@ describe("sanitizePersona(s)", () => {
   it("数组过滤 null / 无 id 条目", () => {
     const list = sanitizePersonas([null, { id: "p1" }, { name: "noid" }, 4]);
     expect(list.map((p) => p.id)).toEqual(["p1"]);
+  });
+});
+
+// ── T-136:适配器模板持久化边界 ─────────────────────────────────────
+describe("sanitizeApiTemplate（T-136）", () => {
+  it("request_headers=null 回落为空对象（不再把 null 带进渲染层）", () => {
+    const t = sanitizeApiTemplate({
+      id: "a",
+      name: "坏模板",
+      api_url: "https://x",
+      request_headers: null,
+    });
+    expect(t.request_headers).toEqual({});
+    expect(() => Object.keys(t.request_headers)).not.toThrow();
+  });
+
+  it("headers 里混入非字符串值时只保留字符串键值", () => {
+    const t = sanitizeApiTemplate({
+      request_headers: { Authorization: "Bearer x", bad: 1, nested: { a: 1 }, nil: null },
+    });
+    expect(t.request_headers).toEqual({ Authorization: "Bearer x" });
+  });
+
+  it("字段类型错误时回落合法默认值", () => {
+    const t = sanitizeApiTemplate({
+      id: 1,
+      name: null,
+      mode: "weird",
+      request_method: "PUT",
+      sse_enabled: "yes",
+      category: 3,
+    });
+    expect(t.id).toBe("");
+    expect(t.name).toBe("");
+    expect(t.mode).toBe("simple");
+    expect(t.request_method).toBe("POST");
+    expect(t.sse_enabled).toBe(true);
+    expect(t.category).toBe("");
+    expect(t.sse_data_prefix).toBe("data: ");
+    expect(t.sse_done_marker).toBe("[DONE]");
+  });
+
+  it("合法模板逐字段保留", () => {
+    const t = sanitizeApiTemplate({
+      id: "tpl",
+      name: "My",
+      mode: "advanced",
+      api_url: "https://api",
+      request_method: "GET",
+      request_headers: { "X-A": "1" },
+      request_body_template: "{}",
+      sse_enabled: false,
+      sse_data_prefix: "data:",
+      sse_done_marker: "END",
+      sse_content_path: "$.x",
+      response_content_path: "$.y",
+      category: "chat",
+      is_preset: true,
+      created_at: "c",
+      updated_at: "u",
+    });
+    expect(t).toMatchObject({
+      id: "tpl",
+      name: "My",
+      mode: "advanced",
+      api_url: "https://api",
+      request_method: "GET",
+      request_headers: { "X-A": "1" },
+      sse_enabled: false,
+      category: "chat",
+      is_preset: true,
+    });
   });
 });
 

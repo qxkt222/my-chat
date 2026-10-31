@@ -3,7 +3,8 @@
 // 外部参考:AI Toolbox 的 prompt chain(最多 10 步、每步等前一轮回复、占位符填充)。
 // 实现:每条链 = 有序模板步骤;运行链时第一步的 {{input}} 用玩家输入填充,
 // 后续步骤的 {{input}} 用上一步的 AI 回复填充(发送链路用 useChatStore.sendMessage,
-// 它返回的 Promise 在所有流完成时 resolve → 可顺序 await 串联)。
+// 它返回的 Promise 在最终正文写入会话 store 之后 resolve,并直接给出该步正文
+// → 可顺序 await 串联,不需要在 store 里回读)。
 
 export interface PromptChain {
   id: string;
@@ -56,24 +57,24 @@ export function saveChains(custom: PromptChain[]): void {
 
 /**
  * 运行一条链:顺序执行每个步骤,{{input}} 逐步替换为上一步输出。
- * sendMessage 的 Promise 在所有流完成时 resolve → 可 await 串联。
- * 返回最终输出;任一步失败即中止。
+ *
+ * send 直接返回该步的最终正文(T-021):sendMessage 的 Promise 现在只在正文
+ * 已写入会话 store 之后 resolve，因此不再需要「读最后一条 assistant」猜结果
+ * ——旧写法在落库完成前读到的是空占位，下一步会拿到空串并回退成上一步输入。
+ * 某步没有正文(取消/失败)时保持上一步输入不变。返回最终输出;任一步失败即中止。
  */
 export async function runPromptChain(
   chain: PromptChain,
   initialInput: string,
-  send: (content: string) => Promise<void>,
-  getLastAssistantContent: () => string
+  send: (content: string) => Promise<string>
 ): Promise<string> {
   let acc = initialInput;
   for (let i = 0; i < chain.steps.length; i++) {
     const step = chain.steps[i];
     if (!step || !step.trim()) continue;
     const content = step.split("{{input}}").join(acc);
-    await send(content);
-    // 上一步输出 = 该会话最后一条 assistant 消息
-    const last = getLastAssistantContent();
-    if (last) acc = last;
+    const reply = await send(content);
+    if (reply) acc = reply;
   }
   return acc;
 }

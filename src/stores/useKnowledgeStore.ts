@@ -1,9 +1,25 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import type { KnowledgeBase, KnowledgeFile } from "@/types";
 import { getAppDir, readFile, writeFile, listDir, createDir, deleteItem } from "@/lib/tauri";
 
 /** 知识源元数据 localStorage key(认证/新鲜度徽标) */
 const KB_META_KEY = "kb_meta";
+
+/** 可直接当文本编辑/参与上下文的扩展名(与历史 loadFiles 白名单一致) */
+const TEXT_FILE_EXT = ["txt", "md", "json"];
+
+/**
+ * T-017：导入文件的落盘名。
+ *
+ * 导入 PDF/DOCX/图片时，提取出的文本统一存为 `<原文件名>.txt`
+ * （如 `report.pdf.txt`）——列表只读文本文件，原名落盘会让条目从 UI 消失。
+ * 本身就是 txt/md/json 的文件保持原名。
+ */
+export function knowledgeStoredName(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return TEXT_FILE_EXT.includes(ext) ? name : `${name}.txt`;
+}
 
 interface KnowledgeState {
   bases: KnowledgeBase[];
@@ -111,10 +127,16 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const names = await listDir(`${appDir}/knowledge/${baseId}`);
       const files: KnowledgeFile[] = [];
       for (const name of names) {
-        if (name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".json")) {
-          const content = await readFile(`${appDir}/knowledge/${baseId}/${name}`);
-          files.push({ name, content });
+        // T-017：列出目录里的全部文件，不再只认 txt/md/json。
+        // 旧版本导入的 `report.pdf`（内容其实是提取出的文本）以及任何
+        // 读不出内容的历史文件都必须可见、可删除，不能从 UI 静默消失。
+        let content = "";
+        try {
+          content = await readFile(`${appDir}/knowledge/${baseId}/${name}`);
+        } catch {
+          /* 读不出内容仍保留条目（空内容），留给用户删除 */
         }
+        files.push({ name, content });
       }
       set({ files });
     } catch {
@@ -133,6 +155,11 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   },
 
   deleteFile: async (baseId, name) => {
+    // T-016：先删 sled 里的 chunks，再删磁盘文件。
+    // 顺序不能反：chunks 删失败时磁盘文件还在 —— 用户可以重试；
+    // 若先删磁盘再删 chunks 失败，已删内容仍会被检索召回（原缺陷）。
+    // 失败直接向上抛，由 KnowledgeManager 提示并保留列表项（不制造假删除）。
+    await invoke<number>("rag_delete_document", { kbId: baseId, fileId: name });
     // F3 真删除：删文件而非写空占位（旧实现重启后残留空文件）
     const appDir = await getAppDir();
     try {
@@ -149,7 +176,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const names = await listDir(`${appDir}/knowledge/${baseId}`);
       let ctx = "";
       for (const name of names) {
-        if (name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".json")) {
+        const ext = name.split(".").pop()?.toLowerCase() ?? "";
+        if (TEXT_FILE_EXT.includes(ext)) {
           const content = await readFile(`${appDir}/knowledge/${baseId}/${name}`);
           ctx += `\n--- ${name} ---\n${content}\n`;
         }

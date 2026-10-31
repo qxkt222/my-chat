@@ -141,8 +141,13 @@ interface ConversationState {
   /** 批量归档/取消归档 */
   toggleArchiveMany: (ids: string[], archived: boolean) => Promise<void>;
   removeLastAssistantMessage: (convId: string) => Promise<void>;
-  /** Context compression: wipe all messages, then seed the summary (Chatbox style) */
-  replaceMessages: (convId: string, seed: Message[]) => Promise<void>;
+  /** 只删除指定消息（重新生成某个旧气泡；其余消息原样保留） */
+  removeMessage: (convId: string, msgId: string) => Promise<void>;
+  /** Context compression: wipe all messages, then seed the summary (Chatbox style).
+   *  expectedCount = 压缩开始时的消息数；当前数量不符时不再整段清空：
+   *  - 更多 → 把超出基线的消息（压缩期间新增）合并到摘要种子之后；
+   *  - 更少 → 放弃替换并返回 false（期间有消息被删，不能拿摘要覆盖幸存消息）。 */
+  replaceMessages: (convId: string, seed: Message[], expectedCount?: number) => Promise<boolean>;
   /** 自动记忆:持久化会话摘要 + 摘要时的消息数记账(轻量 IPC,不重写其他字段) */
   updateSummary: (convId: string, summary: string, summaryMsgCount: number) => Promise<void>;
   /** 会话重置:清空当前对话消息、上下文归零、标题回到 "New Chat"(会话保留) */
@@ -450,49 +455,71 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     // seq: monotonic per-conversation insertion order — timestamps alone are
     // not enough (a 一问多答 turn creates N assistant messages in the same
     // millisecond, so restart would scramble their order).
-    const conv = allOf(get()).find((c) => c.id === convId);
-    const seq = (conv ? Math.max(0, ...conv.messages.map((m) => m.seq ?? 0)) : 0) + 1;
+    const initial = allOf(get()).find((c) => c.id === convId);
+    const seq = (initial ? Math.max(0, ...initial.messages.map((m) => m.seq ?? 0)) : 0) + 1;
     await dbAddMsg(toMsgDto(msg, convId, seq));
-    if (conv) {
-      const stored = { ...msg, seq };
-      conv.messages.push(stored);
-      if (conv.messages.length === 1 && msg.role === "user") conv.title = msg.content.slice(0, 50);
-      conv.updated_at = nowISO();
-      await dbCreateConv({
-        id: conv.id,
-        title: conv.title,
-        model_name: conv.model_name || "",
-        system_prompt: conv.system_prompt || "",
-        created_at: conv.created_at,
-        updated_at: conv.updated_at,
-        character_id: conv.character_id || "",
-        persona_id: conv.persona_id || "",
-        // 整条重写会话记录：必须带上原 work_mode，否则 chat 会话会被默认值改回 work
-        work_mode: convWorkMode(conv),
-      });
-      set((s) => withAll(s, allOf(s)));
-    }
+    // T-018: 重新读取 await 之后的最新会话。整条 dbCreateConv 是覆盖写，
+    // 若这里拿 await 前的旧快照，后台摘要在此期间落盘的 summary 会被清空。
+    const conv = allOf(get()).find((c) => c.id === convId);
+    if (!conv) return;
+    const wasEmpty = conv.messages.length === 0;
+    const stored = { ...msg, seq };
+    const title = wasEmpty && msg.role === "user" ? msg.content.slice(0, 50) : conv.title;
+    const updatedAt = nowISO();
+    await dbCreateConv({
+      id: conv.id,
+      title,
+      model_name: conv.model_name || "",
+      system_prompt: conv.system_prompt || "",
+      created_at: conv.created_at,
+      updated_at: updatedAt,
+      character_id: conv.character_id || "",
+      persona_id: conv.persona_id || "",
+      // Rust create_conv 是全量 insert：必须带原 work_mode、摘要与记账数，
+      // 否则磁盘上的摘要会被 #[serde(default)] 写成 ""/0 (T-018)。
+      summary: conv.summary || "",
+      summary_msg_count: conv.summary_msg_count ?? 0,
+      work_mode: convWorkMode(conv),
+    });
+    // T-035: 不可变更新 —— conversations 与 conv.messages 都必须是新引用，
+    // 否则 ChatView 的 messages→rows 全链 useMemo 依赖不变，界面看不到新消息。
+    set((s) => {
+      const all = allOf(s).map((c) =>
+        c.id === convId
+          ? { ...c, title, updated_at: updatedAt, messages: [...c.messages, stored] }
+          : c
+      );
+      return withAll(s, all);
+    });
   },
 
   addMessagesBatch: async (convId, msgs) => {
     const conv = allOf(get()).find((c) => c.id === convId);
     const base = conv ? Math.max(0, ...conv.messages.map((m) => m.seq ?? 0)) : 0;
     const updated = msgs.map((m, i) => ({ ...m, seq: base + i + 1 }));
+    const updatedAt = nowISO();
     await dbBatchAddMessages(
       convId,
       updated.map((m, i) => toMsgDto(m, convId, base + i + 1)),
       conv?.title || "New Chat",
-      nowISO()
+      updatedAt
     );
-    if (conv) {
-      conv.messages.push(...updated);
-      if (conv.messages.length === msgs.length) {
-        const firstUser = updated.find((m) => m.role === "user");
-        if (firstUser) conv.title = firstUser.content.slice(0, 50);
-      }
-      conv.updated_at = nowISO();
-      set((s) => withAll(s, allOf(s)));
-    }
+    if (!conv) return;
+    // 重新读取 await 之后的最新会话：避免并发写入（流式占位/摘要）被旧快照覆盖。
+    const cur = allOf(get()).find((c) => c.id === convId);
+    if (!cur) return;
+    const wasEmpty = cur.messages.length === 0;
+    const firstUser = updated.find((m) => m.role === "user");
+    const title = wasEmpty && firstUser ? firstUser.content.slice(0, 50) : cur.title;
+    // T-035: 不可变更新 —— 新 conv 对象 + 新 messages 数组（旧数组不 push）。
+    set((s) => {
+      const all = allOf(s).map((c) =>
+        c.id === convId
+          ? { ...c, title, updated_at: updatedAt, messages: [...c.messages, ...updated] }
+          : c
+      );
+      return withAll(s, all);
+    });
   },
 
   updateMessage: async (convId, msgId, content) => {
@@ -612,15 +639,65 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     });
   },
 
-  replaceMessages: async (convId, seed) => {
+  removeMessage: async (convId, msgId) => {
+    const conv = allOf(get()).find((c) => c.id === convId);
+    if (!conv) return;
+    const idx = conv.messages.findIndex((m) => m.id === msgId);
+    if (idx < 0) return;
+    const remaining = conv.messages.filter((m) => m.id !== msgId);
+
+    // 尾部 assistant 用现成增量 IPC；其余位置没有 delete-by-id 命令，
+    // 只能清空后重写剩余消息（调用前 regenerate 已保证没有在途流）。
+    if (idx === conv.messages.length - 1 && conv.messages[idx]?.role === "assistant") {
+      await dbDeleteLastAsmMsg(convId);
+    } else {
+      await dbClearMessages(convId);
+      if (remaining.length > 0) {
+        await dbBatchAddMessages(
+          convId,
+          remaining.map((m, i) => toMsgDto(m, convId, i + 1)),
+          conv.title,
+          nowISO()
+        );
+        // batch 在空会话上会用首条 user 重置标题；恢复用户设定/原标题
+        await dbRenameConv(convId, conv.title, nowISO());
+      } else {
+        await dbRenameConv(convId, conv.title, nowISO());
+      }
+    }
+
+    const updated = remaining.map((m, i) => ({ ...m, seq: i + 1 }));
+    set((s) => {
+      const all = allOf(s).map((c) =>
+        c.id === convId ? { ...c, updated_at: nowISO(), messages: updated } : c
+      );
+      return withAll(s, all);
+    });
+  },
+
+  replaceMessages: async (convId, seed, expectedCount) => {
+    const current = allOf(get()).find((c) => c.id === convId);
+    const currentMessages = current?.messages ?? [];
+    let preserved: Message[] = [];
+    if (expectedCount !== undefined) {
+      // 压缩期间消息变少（被删/清空）：不能拿摘要覆盖幸存的对话，放弃替换
+      if (currentMessages.length < expectedCount) return false;
+      // 压缩期间新增的消息既不能丢，也不能被当成摘要的一部分：
+      // 基线之后的消息原样保留在摘要种子后面 (T-019)
+      if (currentMessages.length > expectedCount) {
+        preserved = currentMessages.slice(expectedCount);
+      }
+    }
     await dbClearMessages(convId);
-    const updated = seed.map((m, i) => ({ ...m, seq: i + 1 }));
-    await dbBatchAddMessages(
-      convId,
-      updated.map((m, i) => toMsgDto(m, convId, i + 1)),
-      "New Chat",
-      nowISO()
-    );
+    const updated = [...seed, ...preserved].map((m, i) => ({ ...m, seq: i + 1 }));
+    if (updated.length > 0) {
+      await dbBatchAddMessages(
+        convId,
+        updated.map((m, i) => toMsgDto(m, convId, i + 1)),
+        "New Chat",
+        nowISO()
+      );
+    }
     set((s) => {
       const all = allOf(s).map((c) =>
         c.id === convId
@@ -633,6 +710,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       );
       return withAll(s, all);
     });
+    return true;
   },
 
   clearConversation: async (convId) => {

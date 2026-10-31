@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  DrawEngine,
   ModelConfig,
   ModelParameters,
   SamplerPreset,
@@ -9,6 +10,7 @@ import type {
   ConnectionProfile,
 } from "@/types";
 import { BUILTIN_REGEX_RULES, type RegexRule } from "@/lib/regex-format";
+import { sanitizeContextWindow } from "@/lib/context-budget";
 import {
   sanitizeBudgetConfig,
   sanitizeConnectionProfiles,
@@ -26,6 +28,45 @@ import {
 
 /** 工作区子模式：设置「值」按这两套分开存（数据类内容仍全局共享） */
 export type SettingsScope = "chat" | "work";
+
+// ── 绘图全局配置(阶段 2c2):不分 scope,引擎/服务地址与对话行为无关 ──
+/** 绘图引擎设置：chat-model = 沿用当前聊天模型(旧行为)，其余为独立出图服务 */
+export type DrawEngineSetting = DrawEngine | "chat-model";
+
+/** 默认出图参数(存为 `draw_defaults` JSON) */
+export interface DrawDefaults {
+  size: string;
+  steps: number;
+  cfgScale: number;
+  seed: number;
+  sampler: string;
+}
+
+export interface DrawConfig {
+  engine: DrawEngineSetting;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  defaults: DrawDefaults;
+  comfyWorkflow: string;
+}
+
+export const DEFAULT_DRAW_DEFAULTS: DrawDefaults = {
+  size: "1024x1024",
+  steps: 20,
+  cfgScale: 7,
+  seed: -1,
+  sampler: "",
+};
+
+export const DEFAULT_DRAW_CONFIG: DrawConfig = {
+  engine: "chat-model",
+  baseUrl: "",
+  apiKey: "",
+  model: "",
+  defaults: { ...DEFAULT_DRAW_DEFAULTS },
+  comfyWorkflow: "",
+};
 
 /** 每个 scope 独立的一份设置值 */
 export interface ScopedSettingsValues {
@@ -67,6 +108,10 @@ interface SettingsState {
   /** Reasoning model controls (global): thinking on/off + effort level */
   thinkingEnabled: boolean;
   reasoningEffort: "low" | "medium" | "high" | "max";
+  /** 绘图全局配置(引擎/服务地址/密钥/默认参数/ComfyUI 工作流) */
+  drawConfig: DrawConfig;
+  /** 更新并立即落盘绘图配置(设置键:draw_engine/draw_base_url/draw_api_key/…) */
+  setDrawConfig: (patch: Partial<DrawConfig>) => Promise<void>;
   load: () => Promise<void>;
   save: () => Promise<void>;
   /** 切换生效 scope：把顶层字段换成该 scope 的值（不落盘） */
@@ -142,8 +187,10 @@ function parseParams(raw: string | undefined): ModelParameters {
     const out: ModelParameters = {};
     if (typeof obj.temperature === "number") out.temperature = obj.temperature;
     if (typeof obj.max_tokens === "number") out.max_tokens = obj.max_tokens;
-    // Token 预算:模型上下文窗口(缺省保守 8192,可手动覆盖)
-    if (typeof obj.context_window === "number") out.context_window = obj.context_window;
+    // Token 预算:模型上下文窗口(缺省保守 8192,可手动覆盖)。
+    // T-112: 0/NaN/负数与过小值在这里就收敛,坏数据不得进入发送链路。
+    const contextWindow = sanitizeContextWindow(obj.context_window);
+    if (contextWindow !== undefined) out.context_window = contextWindow;
     if (typeof obj.top_p === "number") out.top_p = obj.top_p;
     if (typeof obj.top_k === "number") out.top_k = obj.top_k;
     if (typeof obj.repetition_penalty === "number") out.repetition_penalty = obj.repetition_penalty;
@@ -163,9 +210,122 @@ function parseParams(raw: string | undefined): ModelParameters {
   }
 }
 
+function parseDrawDefaults(raw: string | undefined): DrawDefaults {
+  if (!raw) return { ...DEFAULT_DRAW_DEFAULTS };
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const num = (camel: string, snake: string, fallback: number): number => {
+      const v = obj[camel] ?? obj[snake];
+      return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+    };
+    return {
+      size: typeof obj.size === "string" && obj.size.trim() ? obj.size : DEFAULT_DRAW_DEFAULTS.size,
+      steps: num("steps", "steps", DEFAULT_DRAW_DEFAULTS.steps),
+      cfgScale: num("cfgScale", "cfg_scale", DEFAULT_DRAW_DEFAULTS.cfgScale),
+      seed: num("seed", "seed", DEFAULT_DRAW_DEFAULTS.seed),
+      sampler: typeof obj.sampler === "string" ? obj.sampler : DEFAULT_DRAW_DEFAULTS.sampler,
+    };
+  } catch {
+    return { ...DEFAULT_DRAW_DEFAULTS };
+  }
+}
+
+function parseDrawEngine(raw: string | undefined): DrawEngineSetting {
+  return raw === "openai" || raw === "comfyui" || raw === "sdwebui" ? raw : "chat-model";
+}
+
+/**
+ * 读全局绘图配置。单个 key 失败只回退默认值,不拖垮其它设置
+ * (与 readScopedValues 同样是「坏一条不影响全局」的策略)。
+ */
+async function readDrawConfig(): Promise<DrawConfig> {
+  const safe = async (key: string): Promise<string> => {
+    try {
+      return (await dbGetSetting(key)) || "";
+    } catch {
+      return "";
+    }
+  };
+  const [engine, baseUrl, apiKey, model, defaults, comfyWorkflow] = await Promise.all([
+    safe("draw_engine"),
+    safe("draw_base_url"),
+    safe("draw_api_key"),
+    safe("draw_model"),
+    safe("draw_defaults"),
+    safe("draw_comfy_workflow"),
+  ]);
+  return {
+    engine: parseDrawEngine(engine),
+    baseUrl,
+    apiKey,
+    model,
+    defaults: parseDrawDefaults(defaults),
+    comfyWorkflow,
+  };
+}
+
 /** 工作 scope 沿用历史 key；对话 scope 用 `${key}#chat` —— 旧数据天然继续属于「工作」 */
 export function scopedSettingKey(base: string, scope: SettingsScope): string {
   return scope === "chat" ? `${base}#chat` : base;
+}
+
+/** api_url 归一化结果；reason 供向导选择提示文案。 */
+export type ApiUrlNormalization =
+  | { ok: true; url: string; changed: boolean }
+  | { ok: false; reason: "empty" | "scheme" | "invalid" };
+
+/** 无 scheme 的输入是否「像主机名」——避免把误贴的 API key 补成 http://sk-xxx */
+function looksLikeHost(parsed: URL): boolean {
+  const host = parsed.hostname;
+  return (
+    host === "localhost" ||
+    host.includes(".") ||
+    host.startsWith("[") || // IPv6 字面量（URL.hostname 带动方括号）
+    parsed.port !== ""
+  );
+}
+
+/**
+ * 把用户输入的 api_url 归一化为 http(s) 地址（T-033）。
+ *
+ * - 缺 scheme 且形如 `host:port/path` → 自动补 `http://`；
+ * - 非 http(s) scheme → 拒绝（reason: "scheme"），不允许保存；
+ * - 保存前统一去首尾空白与尾斜杠。
+ *
+ * 与 Rust `normalize_api_url` 保持同一套判定，避免「前端能存、后端自愈丢弃」。
+ */
+export function normalizeApiUrl(raw: string): ApiUrlNormalization {
+  const input = raw.trim();
+  if (!input) return { ok: false, reason: "empty" };
+  if (/[\s\u0000-\u001f\u007f]/.test(input)) return { ok: false, reason: "invalid" };
+
+  const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(input);
+  let candidate: string;
+  if (schemeMatch) {
+    const scheme = schemeMatch[1]?.toLowerCase() ?? "";
+    if (scheme !== "http" && scheme !== "https") return { ok: false, reason: "scheme" };
+    candidate = input;
+  } else {
+    if (input.startsWith("/") || input.startsWith("\\")) {
+      return { ok: false, reason: "invalid" };
+    }
+    candidate = `http://${input}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, reason: "scheme" };
+  }
+  if (!parsed.hostname) return { ok: false, reason: "invalid" };
+  if (!schemeMatch && !looksLikeHost(parsed)) return { ok: false, reason: "invalid" };
+
+  const url = candidate.replace(/\/+$/, "");
+  return { ok: true, url, changed: url !== raw };
 }
 
 const WORK_SUB_MODE_STORAGE_KEY = "work_sub_mode";
@@ -302,6 +462,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loaded: false,
   thinkingEnabled: true,
   reasoningEffort: "high",
+  drawConfig: { ...DEFAULT_DRAW_CONFIG, defaults: { ...DEFAULT_DRAW_DEFAULTS } },
 
   load: async () => {
     try {
@@ -344,6 +505,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       } catch {
         /* ignore */
       }
+      // Load drawing config (全局:引擎/服务地址/密钥/默认参数/ComfyUI 工作流)
+      const drawConfig = await readDrawConfig();
       // Load connection profiles (酒馆 Connection Profiles)
       let connectionProfiles: ConnectionProfile[] = [];
       try {
@@ -352,18 +515,45 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       } catch {
         /* ignore */
       }
-      // Defensive filter: drop records with a non-URL api_url (corrupted data)
+      // Defensive filter: records with an unusable api_url stay in the DB
+      // (Rust self-heal keeps them too) but are not offered to the UI. Missing
+      // schemes are repaired here so legacy `localhost:11434/v1` keeps working.
       // F2: per-model parameters come from the persisted params_json record.
-      const validModels = models
-        .filter((m) => /^https?:\/\//i.test(String(m.api_url || "").trim()))
-        .map((m) => ({
-          name: m.name,
-          provider: m.provider,
-          api_url: m.api_url,
-          api_key: m.api_key_encrypted || "",
-          model: m.model,
-          parameters: parseParams(m.params_json),
-        }));
+      const skippedModels: string[] = [];
+      // T-040：Rust 解不开密文时返回 api_key_locked 标记 + 空 key。空值只代表
+      // 「本次拿不到明文」，不是「用户清空了 key」——Rust 的 save_model 收到空
+      // key 会保留原密文，这里额外留痕，避免用户以为 key 丢了。
+      const lockedModels: string[] = [];
+      const validModels = models.flatMap((m) => {
+        const normalized = normalizeApiUrl(String(m.api_url || ""));
+        if (!normalized.ok) {
+          skippedModels.push(m.name);
+          return [];
+        }
+        if ((m as { api_key_locked?: boolean }).api_key_locked) lockedModels.push(m.name);
+        return [
+          {
+            name: m.name,
+            provider: m.provider,
+            api_url: normalized.url,
+            api_key: m.api_key_encrypted || "",
+            model: m.model,
+            parameters: parseParams(m.params_json),
+          },
+        ];
+      });
+      if (skippedModels.length > 0) {
+        // 不静默：记录仍在数据库里，只是本轮不可用（Rust 自愈同样保留记录）
+        logDiag(
+          `settings.load: 跳过 api_url 非 http(s) 的模型（记录已保留）: ${skippedModels.join(", ")}`
+        );
+      }
+      if (lockedModels.length > 0) {
+        // 不静默：密文仍在库中，本次只是拿不到明文（重启/换账户常见）
+        logDiag(
+          `settings.load: ${lockedModels.join(", ")} 的 API key 解密失败（密文仍在库中，需重新输入 key 才能使用）`
+        );
+      }
       // Remap active_model if it pointed at a dropped record ("DeepSeek " → "DeepSeek")
       // 两套 scope 各自修复，避免对话 scope 的历史值在切换后指向不存在的模型。
       const remapActive = (name: string): string => {
@@ -371,7 +561,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         if (validModels.some((m) => m.name === name)) return name;
         const trimmed = name.trim();
         const match = validModels.find((m) => m.name === trimmed);
-        return match ? match.name : "";
+        if (match) return match.name;
+        // 不静默清空：数据库里的 active_model 保留，前端只是本轮没有可用模型
+        logDiag(`settings.load: active_model「${name}」不可用，已临时清空（数据库记录保留）`);
+        return "";
       };
       const scopes: Record<SettingsScope, ScopedSettingsValues> = {
         work: { ...workValues, activeModel: remapActive(workValues.activeModel) },
@@ -392,6 +585,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         budgetConfig: current.budgetConfig,
         stoppingStrings: current.stoppingStrings,
         connectionProfiles,
+        drawConfig,
         loaded: true,
         thinkingEnabled: current.thinkingEnabled,
         reasoningEffort: current.reasoningEffort,
@@ -413,7 +607,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         api_url: m.api_url,
         api_key_encrypted: m.api_key,
         model: m.model,
-        params_json: JSON.stringify(m.parameters || defaultParameters),
+        // T-028: 没有 per-model 参数就写 "{}"，**不要**把当前 scope 的默认值烧进来。
+        // defaultParameters 是当前 scope 的镜像；旧写法会让「对话」里新增的模型带
+        // 显式参数，重启后跨 scope 生效（发送端 useChatStore 先取 model.parameters）。
+        // 发送端已有回退逻辑：model.parameters?.x ?? 当前 scope 默认值。
+        params_json: JSON.stringify(m.parameters ?? {}),
       });
     }
     // 只写当前 scope 的三个 key（预算/全局指令/停止串由各自 setter 即时落盘）
@@ -448,11 +646,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       logDiag(`dbDeleteModel failed: ${String(e)} name=${name}`);
     });
     set((s) => {
-      const activeModel = s.activeModel === name ? "" : s.activeModel;
+      // T-096: 模型列表是全局的，两个 scope 的 activeModel 都可能指向它。
+      // 只清当前 scope 会让另一个 scope 残留已删名字 —— 切过去后 select
+      // 没有匹配项、发送按钮直接置灰。
+      const scopes = {
+        work: { ...s.scopes.work },
+        chat: { ...s.scopes.chat },
+      };
+      if (scopes.work.activeModel === name) scopes.work.activeModel = "";
+      if (scopes.chat.activeModel === name) scopes.chat.activeModel = "";
       return {
         models: s.models.filter((m) => m.name !== name),
-        activeModel,
-        scopes: patchScope(s, { activeModel }),
+        activeModel: s.activeModel === name ? "" : s.activeModel,
+        scopes,
       };
     });
   },
@@ -473,6 +679,25 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       scopes: patchScope(s, { thinkingEnabled: enabled, reasoningEffort: effort }),
     })),
 
+  setDrawConfig: async (patch) => {
+    set((s) => ({ drawConfig: { ...s.drawConfig, ...patch } }));
+    const jobs: Promise<void>[] = [];
+    if (patch.engine !== undefined) jobs.push(dbSaveSetting("draw_engine", patch.engine));
+    if (patch.baseUrl !== undefined) jobs.push(dbSaveSetting("draw_base_url", patch.baseUrl));
+    // `_key` 后缀由 Rust 侧自动 DPAPI 加密/解密
+    if (patch.apiKey !== undefined) jobs.push(dbSaveSetting("draw_api_key", patch.apiKey));
+    if (patch.model !== undefined) jobs.push(dbSaveSetting("draw_model", patch.model));
+    if (patch.defaults !== undefined)
+      jobs.push(dbSaveSetting("draw_defaults", JSON.stringify(patch.defaults)));
+    if (patch.comfyWorkflow !== undefined)
+      jobs.push(dbSaveSetting("draw_comfy_workflow", patch.comfyWorkflow));
+    try {
+      await Promise.all(jobs);
+    } catch (e) {
+      logDiag(`setDrawConfig failed: ${String(e)}`);
+    }
+  },
+
   persistActiveModel: (name) => {
     const scope = get().scope;
     set((s) => ({
@@ -491,9 +716,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       name: m.name,
       provider: m.provider || "",
       api_url: m.api_url,
+      // T-040：空 key（解密失败/未填）不会覆盖库中已有密文 —— Rust save_model
+      // 对此做了保留；这里与 save() 的 T-028 写法保持一致。
       api_key_encrypted: m.api_key,
       model: m.model,
-      params_json: JSON.stringify(m.parameters || get().defaultParameters),
+      // T-028/T-040：无 per-model 参数写 "{}"，不把当前 scope 默认值烧进记录
+      params_json: JSON.stringify(m.parameters ?? {}),
     }).catch((e: unknown) => {
       // 保存模型失败 = 用户以为存了其实没存，最该留痕的一类
       logDiag(`dbSaveModel failed: ${String(e)} name=${name}`);

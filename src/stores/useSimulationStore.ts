@@ -95,8 +95,8 @@ interface SimulationState {
   resolveModel: (conv: SimulationConversation) => ModelConfig | undefined;
   /** 推演一轮(回合制一步 / 时间步进 / 自动连续的一轮共用) */
   sendMessage: (content: string) => Promise<void>;
-  /** 自动连续推演 N 轮(每轮 sendMessage,可打断) */
-  continueRounds: (n: number) => Promise<void>;
+  /** 自动连续推演 N 轮(每轮 sendMessage,可打断);n 省略时取会话的 autoRounds */
+  continueRounds: (n?: number) => Promise<void>;
   /** 每轮推演完成后的收尾:记忆卡 + 世界状态同步(按 stateUpdate 策略分派) */
   afterTurn: (convId: string) => Promise<void>;
   /** 时间步进:注入时间跨度,推演该时段事件并更新当前时间 */
@@ -320,6 +320,62 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     const model = get().resolveModel(conv);
     if (!model) return;
 
+    const userMsg: Message = { id: uuid(), role: "user", content, timestamp: nowISO() };
+    const asmMsg: Message = {
+      id: uuid(),
+      role: "assistant",
+      content: "",
+      timestamp: nowISO(),
+      model: model.model || model.name,
+    };
+    const requestId = uuid();
+    const updated = {
+      ...conv,
+      messages: [...conv.messages, userMsg, asmMsg],
+      updated_at: nowISO(),
+    };
+    // T-089:先占位再 await。isStreaming/activeRequestId 若在 memSearch/saveConv
+    // 之后才置位,两次快速触发都能通过上面的守卫各起一条流,而 activeRequestId
+    // 只记后者,cancelGeneration 只能停掉其中一条。置位后第二次调用在此直接返回。
+    set({
+      conversations: get().conversations.map((c) => (c.id === conv.id ? updated : c)),
+      isStreaming: true,
+      activeRequestId: requestId,
+    });
+
+    let finished = false;
+    const finish = async (errText?: string) => {
+      if (finished) return;
+      finished = true;
+      // 收尾前落出挂起帧(finish 读 store 里的最终内容,且避免收尾后重复追加)
+      simStreamBatcher.flush();
+      const cur = get().conversations.find((c) => c.id === conv.id);
+      if (cur) {
+        const msgs = cur.messages.map((m) =>
+          m.id === asmMsg.id ? { ...m, error: errText || m.error } : m
+        );
+        try {
+          await get().saveConv({ ...cur, messages: msgs, updated_at: nowISO() });
+        } catch {
+          /* 落盘失败也不能把 isStreaming 永久卡在 true */
+        }
+      }
+      // 只清理属于本请求的状态:取消后用户可能已发起新请求,不能让旧流迟到的
+      // done 把新请求的 isStreaming/activeRequestId 清掉(T-089)。
+      if (get().activeRequestId === requestId) {
+        set({ isStreaming: false, activeRequestId: null });
+      }
+    };
+
+    try {
+      await get().saveConv(updated);
+    } catch (e) {
+      void finish(String(e ?? ""));
+      return;
+    }
+    // 保存期间用户点了停止:不再发起流式请求
+    if (get().activeRequestId !== requestId) return;
+
     // 三段式(推演模式):stableSystem(类型指令+设定+节奏+钉住+回锚)恒定前缀 +
     // 状态先于文本(35,TextWorld/MUD 架构):stateBlock 移到历史【前】——
     // AI 先看到当前局面再推演,因果一致;history 中段;note 靠近生成处;user 最后
@@ -349,6 +405,8 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     } catch {
       /* 记忆检索失败静默 */
     }
+    // 检索期间被取消:流还没起,不要再把本轮发给模型
+    if (get().activeRequestId !== requestId) return;
     apiMessages.push({ role: "user", content });
     // 双记忆槽(26):Author's Note 插靠近生成处(短程控制当前推演指令)
     if (conv.note?.trim()) {
@@ -378,43 +436,6 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       if (model.parameters && model.parameters[k] != null) return model.parameters[k] as number;
       const d = settingsStore.defaultParameters[k];
       return d != null ? d : null;
-    };
-
-    const userMsg: Message = { id: uuid(), role: "user", content, timestamp: nowISO() };
-    const asmMsg: Message = {
-      id: uuid(),
-      role: "assistant",
-      content: "",
-      timestamp: nowISO(),
-      model: model.model || model.name,
-    };
-    const requestId = uuid();
-    const updated = {
-      ...conv,
-      messages: [...conv.messages, userMsg, asmMsg],
-      updated_at: nowISO(),
-    };
-    set({
-      conversations: get().conversations.map((c) => (c.id === conv.id ? updated : c)),
-      isStreaming: true,
-      activeRequestId: requestId,
-    });
-    await get().saveConv(updated);
-
-    let finished = false;
-    const finish = async (errText?: string) => {
-      if (finished) return;
-      finished = true;
-      // 收尾前落出挂起帧(finish 读 store 里的最终内容,且避免收尾后重复追加)
-      simStreamBatcher.flush();
-      const cur = get().conversations.find((c) => c.id === conv.id);
-      if (cur) {
-        const msgs = cur.messages.map((m) =>
-          m.id === asmMsg.id ? { ...m, error: errText || m.error } : m
-        );
-        await get().saveConv({ ...cur, messages: msgs, updated_at: nowISO() });
-      }
-      set({ isStreaming: false, activeRequestId: null });
     };
 
     try {
@@ -524,8 +545,11 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
 
   continueRounds: async (n) => {
     if (get().isStreaming) return;
+    // T-107:autoRounds 此前只写不读,是死选项。省略 n 时改取当前会话的
+    // autoRounds(创建时的「自动推演轮数」),让该设置真正生效。
+    const target = n ?? get().getActive()?.autoRounds ?? 1;
     set({ cancelRounds: false });
-    const rounds = Math.max(1, Math.floor(n) || 1);
+    const rounds = Math.max(1, Math.floor(target) || 1);
     for (let i = 0; i < rounds; i++) {
       if (get().cancelRounds || !get().getActive()) break;
       await get().sendMessage(

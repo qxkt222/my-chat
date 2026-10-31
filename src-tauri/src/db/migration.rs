@@ -18,9 +18,9 @@
 // 曾经把快照放在 run_migrations 内(DB 已打开)导致 os error 33 启动崩溃,已修。
 // 文件侧版本号与 sled 内版本号双写,迁移成功后同步;无文件视为旧库(需快照+迁移)。
 
-use super::{key, scan_prefix};
+use super::{key, log_corrupt_record, try_scan_prefix};
 use sled::Db;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 迁移函数签名:把版本 v 升级到 v+1(幂等,内部 flush)
 pub type MigrationFn = fn(&Db) -> Result<(), String>;
@@ -40,9 +40,16 @@ pub const MIGRATIONS: &[MigrationFn] = &[
 /// 无文件 = 旧库未知 → 视为需迁移(触发快照);迁移成功后与 sled 内版本同步写。
 const SCHEMA_FILE: &str = "schema_version.txt";
 
+/// 迁移回滚 marker（指向迁移前快照的普通文本文件）。
+const MIGRATION_MARKER: &str = "migration_pending.txt";
+
 /// 迁移快照目录名前缀（与 [`snapshot_before_migration`] 生成的名字一致）。
 /// 回滚时只认这个前缀，避免 marker 被改写成任意目录后照样被拷进数据库。
 const MIGRATION_SNAPSHOT_PREFIX: &str = "migration-snapshot-";
+
+/// T-039：迁移快照只保留最近 3 份（与 backup.rs 的 pre-restore 快照策略一致）。
+/// 旧实现永不清理，每次 schema 升级都多留一份整库拷贝（含已删会话）。
+const MIGRATION_SNAPSHOT_KEEP: usize = 3;
 
 fn app_data_dir() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").map_or_else(
@@ -56,20 +63,20 @@ fn app_data_dir() -> std::path::PathBuf {
     base.join("com.my-chat")
 }
 
-fn schema_file_path() -> std::path::PathBuf {
-    app_data_dir().join(SCHEMA_FILE)
+fn marker_path(app_data: &Path) -> PathBuf {
+    app_data.join(MIGRATION_MARKER)
 }
 
 /// 文件侧版本(缺省 0 = 无文件/旧库未知 → 需要快照+迁移)
-fn file_version() -> i64 {
-    std::fs::read_to_string(schema_file_path())
+fn file_version_at(app_data: &Path) -> i64 {
+    std::fs::read_to_string(app_data.join(SCHEMA_FILE))
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(0)
 }
 
-fn write_file_version(v: i64) {
-    let _ = std::fs::write(schema_file_path(), v.to_string());
+fn write_file_version_at(app_data: &Path, v: i64) {
+    let _ = std::fs::write(app_data.join(SCHEMA_FILE), v.to_string());
 }
 
 fn unix_secs() -> u64 {
@@ -104,22 +111,83 @@ fn write_version(db: &Db, v: i64) -> Result<(), String> {
 
 /// 迁移前快照 `sled_db` 到 app_data_dir/migration-snapshot-<unix>,写回滚 marker。
 /// **必须在 sled 打开前调用**(打开后 db 文件被 Windows 锁,拷贝会 os error 33)。
-fn snapshot_before_migration() -> Result<String, String> {
-    let src = super::app_db_path();
-    if !src.is_dir() {
+fn snapshot_before_migration_at(app_data: &Path, db_path: &Path) -> Result<String, String> {
+    if !db_path.is_dir() {
         return Ok(String::new()); // 新库,无需快照
     }
-    let snap = app_data_dir().join(format!("{MIGRATION_SNAPSHOT_PREFIX}{}", unix_secs()));
-    crate::commands::backup::copy_dir_all(&src, &snap)?;
-    let marker = app_data_dir().join("migration_pending.txt");
+    let snap = app_data.join(format!("{MIGRATION_SNAPSHOT_PREFIX}{}", unix_secs()));
+    crate::commands::backup::copy_dir_all(db_path, &snap)?;
+    let marker = marker_path(app_data);
     std::fs::write(&marker, snap.to_string_lossy().to_string())
         .map_err(|e| format!("写迁移回滚标记失败: {e}"))?;
+    // T-039：只保留最近 N 份。清理失败只记日志，绝不影响本次迁移的退路。
+    let removed = prune_old_snapshots_at(app_data, MIGRATION_SNAPSHOT_KEEP);
+    if !removed.is_empty() {
+        crate::commands::chat::log_chat_error(&format!(
+            "MIGRATION_SNAPSHOT: 清理 {} 份旧迁移快照（只保留最近 {MIGRATION_SNAPSHOT_KEEP} 份）: {}",
+            removed.len(),
+            removed.join(", ")
+        ));
+    }
     Ok(snap.to_string_lossy().to_string())
 }
 
-/// 迁移全部成功 → 删除回滚 marker(快照保留,供人工排查)
+/// 迁移全部成功 → 删除回滚 marker(快照保留,供人工排查/按保留策略清理)
 fn clear_migration_marker() {
-    let _ = std::fs::remove_file(app_data_dir().join("migration_pending.txt"));
+    let _ = std::fs::remove_file(marker_path(&app_data_dir()));
+}
+
+/// 迁移快照的排序键：`(名称中的 unix 秒, 修改时间)`。
+/// 名称是主序，同一秒内多次快照靠 mtime 稳定分出先后；解析失败记 0，优先清理。
+fn snapshot_sort_key(path: &Path) -> (u64, std::time::SystemTime) {
+    let ts = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .trim_start_matches(MIGRATION_SNAPSHOT_PREFIX)
+        .parse::<u64>()
+        .unwrap_or(0);
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    (ts, mtime)
+}
+
+/// T-039：只清理 `migration-snapshot-*` 目录，保留最新 `keep` 份，返回被删目录名。
+///
+/// 只认本模块生成的前缀：普通备份、pre-restore 快照、用户自己的目录一律不碰。
+/// 删除失败记日志后继续（清理不能反过来阻断快照/迁移）。
+fn prune_old_snapshots_at(app_data: &Path, keep: usize) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(app_data) else {
+        return Vec::new();
+    };
+    let mut snapshots: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(MIGRATION_SNAPSHOT_PREFIX))
+        })
+        .collect();
+    snapshots.sort_by_key(|p| snapshot_sort_key(p));
+
+    let excess = snapshots.len().saturating_sub(keep);
+    let mut removed = Vec::new();
+    for old in snapshots.into_iter().take(excess) {
+        match std::fs::remove_dir_all(&old) {
+            Ok(()) => removed.push(
+                old.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+            ),
+            Err(e) => crate::commands::chat::log_chat_error(&format!(
+                "清理旧迁移快照失败（已忽略）: {} ({e})",
+                old.display()
+            )),
+        }
+    }
+    removed
 }
 
 /// 校验 marker 指向的回滚快照，返回规范化后的真实路径。
@@ -192,7 +260,7 @@ fn resolve_app_data(app_data: &Path) -> Option<std::path::PathBuf> {
 /// main.rs 在 `run_pending_restore` 之后、`preflight_snapshot`/`init_db` 之前调用。
 pub fn run_pending_migration_rollback() -> Result<(), String> {
     let app_data = app_data_dir();
-    let marker = app_data.join("migration_pending.txt");
+    let marker = marker_path(&app_data);
     if !marker.exists() {
         return Ok(());
     }
@@ -278,13 +346,25 @@ where
 /// 启动预检(DB 打开前):文件版本 < `LATEST` 且 `sled_db` 存在 → 迁移前快照。
 /// 必须在 `init_db`(打开 sled)之前调用;失败不阻止启动(迁移幂等,可后续重试)。
 pub fn preflight_snapshot() -> Result<(), String> {
-    if file_version() >= SCHEMA_VERSION_LATEST {
+    preflight_snapshot_at(&app_data_dir(), &super::app_db_path())
+}
+
+/// [`preflight_snapshot`] 的可测核心。
+///
+/// T-038：已有 marker 时**绝不重拍** —— marker 指向的才是真正的迁移前快照，
+/// 覆盖它会丢掉唯一的回滚点。文件侧版本与库内版本不一致的情况由
+/// [`migrate_db_at`] 的守卫兜住（拒绝迁移并把文件版本修正回库内版本）。
+fn preflight_snapshot_at(app_data: &Path, db_path: &Path) -> Result<(), String> {
+    if file_version_at(app_data) >= SCHEMA_VERSION_LATEST {
         return Ok(()); // 已是最新,无需快照/迁移
     }
-    if !super::app_db_path().is_dir() {
+    if !db_path.is_dir() {
         return Ok(()); // 全新安装,无旧库
     }
-    snapshot_before_migration()?;
+    if marker_path(app_data).exists() {
+        return Ok(()); // 已有回滚点,不得覆盖
+    }
+    snapshot_before_migration_at(app_data, db_path)?;
     Ok(())
 }
 
@@ -303,7 +383,7 @@ pub fn run_migrations() -> Result<(), String> {
     let _ = db.flush();
     clear_migration_marker();
     // 双版本同步:文件侧版本写为 LATEST(下次启动 preflight 跳过快照)
-    write_file_version(SCHEMA_VERSION_LATEST);
+    write_file_version_at(&app_data_dir(), SCHEMA_VERSION_LATEST);
     Ok(())
 }
 
@@ -315,6 +395,11 @@ pub fn run_migrations() -> Result<(), String> {
 /// 现在启动即失败(main.rs setup 返回 Err,应用不进入主界面),错误信息
 /// 明确告知"数据由更新版本创建"。
 fn migrate_db(db: &Db) -> Result<(), String> {
+    migrate_db_at(db, &app_data_dir())
+}
+
+/// [`migrate_db`] 的可测核心（`app_data` 路径注入）。
+fn migrate_db_at(db: &Db, app_data: &Path) -> Result<(), String> {
     let from = current_version(db);
     if from > SCHEMA_VERSION_LATEST {
         return Err(format!(
@@ -325,6 +410,7 @@ fn migrate_db(db: &Db) -> Result<(), String> {
     if from == SCHEMA_VERSION_LATEST {
         return Ok(());
     }
+    ensure_migration_rollback_point(db, app_data, from)?;
     let mut v = from;
     for (i, m) in MIGRATIONS.iter().enumerate() {
         let target = i as i64 + 2;
@@ -337,6 +423,40 @@ fn migrate_db(db: &Db) -> Result<(), String> {
     Ok(())
 }
 
+/// T-038：迁移前必须已有回滚点（marker → 快照）。
+///
+/// 旧实现只信文件侧 `schema_version.txt`：恢复一份旧备份后，若该文件仍写着
+/// 新版本（恢复只替换 `sled_db` 时就是这样），preflight 会跳过快照，迁移在
+/// **没有回滚点**的情况下改数据。现在 DB 打开后按库内 `current_version` 再判一次：
+///
+/// - marker 存在 → 回滚点齐全，放行；
+/// - 库是全新的空库 → 没有可丢的数据，放行（否则首次启动会永远拒绝迁移）；
+/// - 有数据但无 marker → 拒绝迁移。此时 sled 已被 Windows 锁住，无法安全补拍
+///   物理快照；把文件侧版本写回库内真实版本，下次启动的 preflight 就会拍快照，
+///   重启后即可正常迁移。数据在本次拒绝中分毫未动。
+fn ensure_migration_rollback_point(db: &Db, app_data: &Path, from: i64) -> Result<(), String> {
+    if marker_path(app_data).exists() {
+        return Ok(());
+    }
+    if super::ensure_db_empty(db).is_ok() {
+        return Ok(());
+    }
+    let schema_file = app_data.join(SCHEMA_FILE);
+    let hint = if std::fs::write(&schema_file, from.to_string()).is_ok() {
+        "已把文件侧版本号修正为库内版本，请重启应用完成迁移前快照后重试".to_string()
+    } else {
+        format!(
+            "且无法写入 {}（请检查该目录是否可写）",
+            schema_file.display()
+        )
+    };
+    Err(format!(
+        "数据库 schema 版本为 {from}，低于最新 {SCHEMA_VERSION_LATEST}，但没有迁移前快照\
+         （{} 不存在）；为避免无回滚点地改动数据，本次迁移已中止，数据未改动。{hint}。",
+        marker_path(app_data).display()
+    ))
+}
+
 // ── 迁移实现 ─────────────────────────────────────────────
 
 /// m2: memories 急切回填 embedding(此前靠 `search_memories` 查询时逐条自愈)。
@@ -346,8 +466,10 @@ fn migrate_1_to_2(db: &Db) -> Result<(), String> {
         .open_tree("memories")
         .map_err(|e| format!("打开 memories: {e}"))?;
     let mut updated = 0usize;
-    for (k, v) in scan_prefix(&t, "mem:") {
+    // T-037：扫描 IO 错误向上传播（迁移不能基于半份数据继续写库）
+    for (k, v) in try_scan_prefix(&t, "mem:")? {
         let Ok(mut mem) = serde_json::from_slice::<crate::db::memory::Memory>(&v) else {
+            log_corrupt_record("migrate_1_to_2", &k, "JSON 解析失败");
             continue;
         };
         let ok = mem.embedding.as_ref().is_some_and(|b| b.len() >= 4);
@@ -376,9 +498,11 @@ fn migrate_2_to_3(db: &Db) -> Result<(), String> {
         .open_tree("knowledge_chunks")
         .map_err(|e| format!("打开 chunks: {e}"))?;
     let mut updated = 0usize;
-    for (k, v) in scan_prefix(&t, "kc:") {
+    // T-037：同上，读错误必须中止迁移而不是跳过
+    for (k, v) in try_scan_prefix(&t, "kc:")? {
         let Ok(mut chunk) = serde_json::from_slice::<crate::db::knowledge::KnowledgeChunk>(&v)
         else {
+            log_corrupt_record("migrate_2_to_3", &k, "JSON 解析失败");
             continue;
         };
         let ok = chunk.embedding.as_ref().is_some_and(|b| b.len() >= 4);
@@ -614,6 +738,155 @@ mod tests {
 
         let got = validate_rollback_snapshot_at(&snap, &app).expect("合法快照必须通过");
         assert_eq!(got, std::fs::canonicalize(&snap).unwrap());
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    // ── T-038：迁移必须有回滚点 ─────────────────────────────
+
+    /// 有数据但无 marker（典型：恢复旧备份后 `schema_version.txt` 仍写新版本）：
+    /// 必须拒绝迁移、不改库内版本，并把文件侧版本修正为库内版本供下次拍快照。
+    #[test]
+    fn stale_db_without_snapshot_is_refused_and_file_version_rewritten() {
+        let app = temp_app_data("guard-no-snap");
+        let db = temp_db();
+        write_version(&db, 1).unwrap();
+        db.open_tree("conversations")
+            .unwrap()
+            .insert(b"c:1", b"x")
+            .unwrap();
+
+        let err = migrate_db_at(&db, &app).expect_err("有数据但无快照的旧库必须拒绝迁移");
+        assert!(err.contains("迁移前快照"), "{err}");
+        assert!(err.contains("重启"), "错误应给出可执行的恢复步骤: {err}");
+        assert_eq!(current_version(&db), 1, "拒绝迁移不得改写库内版本");
+        assert_eq!(
+            std::fs::read_to_string(app.join(SCHEMA_FILE))
+                .unwrap()
+                .trim(),
+            "1",
+            "文件侧版本必须修正为库内真实版本，供下次 preflight 拍快照"
+        );
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    /// marker 存在 = 回滚点齐全，旧库正常迁移。
+    #[test]
+    fn stale_db_with_marker_migrates() {
+        let app = temp_app_data("guard-with-snap");
+        std::fs::write(marker_path(&app), "snapshot-dir").unwrap();
+        let db = temp_db();
+        write_version(&db, 1).unwrap();
+
+        migrate_db_at(&db, &app).expect("已有回滚点时应允许迁移");
+        assert_eq!(current_version(&db), SCHEMA_VERSION_LATEST);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    /// 全新空库没有可丢的数据：不得因为没有 marker 就拒绝首次启动。
+    #[test]
+    fn fresh_empty_db_migrates_without_snapshot() {
+        let app = temp_app_data("guard-fresh");
+        let db = temp_db();
+        migrate_db_at(&db, &app).expect("全新空库无需快照");
+        assert_eq!(current_version(&db), SCHEMA_VERSION_LATEST);
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    /// preflight 拍快照并写 marker；第二次不得覆盖已有回滚点。
+    #[test]
+    fn preflight_snapshots_and_keeps_existing_marker() {
+        let app = temp_app_data("preflight");
+        let db_path = app.join("sled_db");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::write(db_path.join("db"), b"sled-bytes").unwrap();
+
+        preflight_snapshot_at(&app, &db_path).expect("旧库应拍快照");
+        let marker = marker_path(&app);
+        assert!(marker.exists(), "必须写回滚 marker");
+        let snap = std::fs::read_to_string(&marker).unwrap();
+        assert!(Path::new(&snap).is_dir(), "marker 指向的快照目录必须存在");
+        assert!(snap.contains(MIGRATION_SNAPSHOT_PREFIX));
+
+        preflight_snapshot_at(&app, &db_path).expect("第二次预检应直接通过");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            snap,
+            "已有 marker 不得被覆盖（否则丢掉真正的迁移前快照）"
+        );
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    // ── T-039：迁移快照只保留最近 3 份 ─────────────────────
+
+    fn snapshot_names(app: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(app)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(MIGRATION_SNAPSHOT_PREFIX))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 5 份快照 → 只留最新 3 份；非快照目录不碰。
+    #[test]
+    fn prune_keeps_latest_three_and_leaves_other_dirs() {
+        let app = temp_app_data("prune");
+        for ts in 1..=5u64 {
+            std::fs::create_dir_all(app.join(format!("{MIGRATION_SNAPSHOT_PREFIX}{ts}"))).unwrap();
+        }
+        let backup = app.join("my-chat-backup-1");
+        std::fs::create_dir_all(&backup).unwrap();
+
+        let removed = prune_old_snapshots_at(&app, MIGRATION_SNAPSHOT_KEEP);
+
+        assert_eq!(removed.len(), 2, "5 份快照应只删最旧 2 份: {removed:?}");
+        assert_eq!(
+            snapshot_names(&app),
+            vec![
+                format!("{MIGRATION_SNAPSHOT_PREFIX}3"),
+                format!("{MIGRATION_SNAPSHOT_PREFIX}4"),
+                format!("{MIGRATION_SNAPSHOT_PREFIX}5"),
+            ]
+        );
+        assert!(backup.is_dir(), "普通备份目录不得被清理");
+
+        let _ = std::fs::remove_dir_all(app.parent().unwrap());
+    }
+
+    /// 拍新快照时自动触发保留策略：3 份旧快照 + 1 份新快照 → 只剩 3 份。
+    #[test]
+    fn taking_snapshot_prunes_old_snapshots() {
+        let app = temp_app_data("snap-prune");
+        let db_path = app.join("sled_db");
+        std::fs::create_dir_all(&db_path).unwrap();
+        std::fs::write(db_path.join("db"), b"x").unwrap();
+        for ts in 1..=3u64 {
+            std::fs::create_dir_all(app.join(format!("{MIGRATION_SNAPSHOT_PREFIX}{ts}"))).unwrap();
+        }
+
+        let snap = snapshot_before_migration_at(&app, &db_path).expect("快照应成功");
+
+        assert_eq!(
+            snapshot_names(&app).len(),
+            MIGRATION_SNAPSHOT_KEEP,
+            "新快照写完后最多保留 {MIGRATION_SNAPSHOT_KEEP} 份"
+        );
+        assert!(
+            !app.join(format!("{MIGRATION_SNAPSHOT_PREFIX}1")).exists(),
+            "最旧的一份必须被清理"
+        );
+        assert!(Path::new(&snap).is_dir(), "本次刚拍的快照绝不能被清理");
 
         let _ = std::fs::remove_dir_all(app.parent().unwrap());
     }

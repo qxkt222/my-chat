@@ -252,8 +252,9 @@ export function ChatView() {
   );
 
   // 请求失败重试(错误命名化:限流/超时提供重试按钮;重放最后回合)
-  const handleRetry = useCallback(() => {
-    void useChatStore.getState().regenerate();
+  // T-020: 传入点击的气泡，只重生成目标 assistant，而不是盲删“最后一条”。
+  const handleRetry = useCallback((msg: Message) => {
+    void useChatStore.getState().regenerate(msg.id);
   }, []);
 
   // 消息编辑:弹输入框,改后经 updateMessage 落盘(sled)

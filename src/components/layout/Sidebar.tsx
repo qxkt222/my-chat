@@ -12,9 +12,11 @@ import {
   ListTodo,
 } from "lucide-react";
 import { useT } from "@/lib/i18n";
+import { logDiag } from "@/lib/tauri";
 import { useConversationStore } from "@/stores/useConversationStore";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { askConfirm } from "@/components/ui/ConfirmDialog";
+import { showToast } from "@/components/ui/Toast";
 import type { Conversation } from "@/types";
 
 /** 侧栏视图:会话 / 书签(消息级)/ 任务(后台队列) */
@@ -67,7 +69,14 @@ export function Sidebar() {
   const handleDelete = async (e: React.MouseEvent, conv: Conversation) => {
     e.stopPropagation();
     if (!(await askConfirm(t("sidebar.confirmDelete", { title: conv.title })))) return;
-    remove(conv.id);
+    // T-148: 删除是异步 IPC，失败必须接住 —— 否则是 unhandled rejection，
+    // 列表不更新、用户也看不到任何提示。
+    try {
+      await remove(conv.id);
+    } catch (err) {
+      logDiag(`sidebar remove failed: ${String(err)} id=${conv.id}`);
+      showToast("error", t("sidebar.deleteFailed", { title: conv.title }));
+    }
   };
 
   const exitManage = () => {
@@ -78,14 +87,26 @@ export function Sidebar() {
   const batchDelete = async () => {
     if (selected.length === 0) return;
     if (!(await askConfirm(t("sidebar.confirmBatchDelete", { n: selected.length })))) return;
-    void removeMany(selected);
-    exitManage();
+    try {
+      await removeMany(selected);
+    } catch (err) {
+      logDiag(`sidebar removeMany failed: ${String(err)} count=${selected.length}`);
+      showToast("error", t("sidebar.batchDeleteFailed", { n: selected.length }));
+    } finally {
+      exitManage();
+    }
   };
 
-  const batchArchive = (archivedState: boolean) => {
+  const batchArchive = async (archivedState: boolean) => {
     if (selected.length === 0) return;
-    void toggleArchiveMany(selected, archivedState);
-    exitManage();
+    try {
+      await toggleArchiveMany(selected, archivedState);
+    } catch (err) {
+      logDiag(`sidebar toggleArchiveMany failed: ${String(err)}`);
+      showToast("error", t("sidebar.archiveFailed"));
+    } finally {
+      exitManage();
+    }
   };
 
   if (collapsed) {
@@ -301,7 +322,7 @@ export function Sidebar() {
                   : t("sidebar.selectHint")}
               </span>
               <button
-                onClick={() => batchArchive(showArchived ? false : true)}
+                onClick={() => void batchArchive(showArchived ? false : true)}
                 disabled={selected.length === 0}
                 className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-primary disabled:opacity-30"
                 title={showArchived ? t("sidebar.unarchive") : t("sidebar.archive")}

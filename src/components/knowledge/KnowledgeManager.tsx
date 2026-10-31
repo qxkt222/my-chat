@@ -10,7 +10,7 @@ import {
   BadgeCheck,
   Sparkles,
 } from "lucide-react";
-import { useKnowledgeStore } from "@/stores/useKnowledgeStore";
+import { useKnowledgeStore, knowledgeStoredName } from "@/stores/useKnowledgeStore";
 import { useT } from "@/lib/i18n";
 import {
   ragSearch,
@@ -28,6 +28,21 @@ import { askConfirm } from "@/components/ui/ConfirmDialog";
 
 const DOC_EXT = ["pdf", "docx", "txt", "md"];
 const IMG_EXT = ["png", "jpg", "jpeg", "webp", "bmp"];
+
+/**
+ * T-068：检索分数的展示文案。
+ *
+ * 后端已把三种模式归一到 0..=1；这里再标注分数来源，避免用户把
+ * BM25 相对分 / cosine / RRF 融合分当成同一种「相关度」。
+ */
+export function formatRagScore(score: number, scoreKind?: string): string {
+  const safe = Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0;
+  const percent = Math.round(safe * 100);
+  if (scoreKind === "rrf") return `relevance ${percent}% (RRF fusion)`;
+  if (scoreKind === "bm25") return `relevance ${percent}% (BM25)`;
+  if (scoreKind === "cosine") return `relevance ${percent}% (vector)`;
+  return `relevance ${percent}%`;
+}
 
 export function KnowledgeManager() {
   const t = useT();
@@ -105,11 +120,14 @@ export function KnowledgeManager() {
         showToast("error", t("kb.noText"));
         return;
       }
-      await kb.saveFile(kb.activeBaseId, name, text);
+      // T-017：非文本文件把提取出的文本存成 `<原名>.txt` 并索引这个 txt，
+      // 列表（只读文本文件）才能看到/编辑/删除/重建它。不再保留原文件名。
+      const storedName = knowledgeStoredName(name);
+      await kb.saveFile(kb.activeBaseId, storedName, text);
       await kb.loadFiles(kb.activeBaseId);
-      const count = await ragIndexDocument(kb.activeBaseId, name, text);
-      setIndexed((s) => ({ ...s, [name]: count }));
-      showToast("success", t("kb.imported", { name, count }));
+      const count = await ragIndexDocument(kb.activeBaseId, storedName, text);
+      setIndexed((s) => ({ ...s, [storedName]: count }));
+      showToast("success", t("kb.imported", { name: storedName, count }));
     } catch (e) {
       showToast("error", `${t("kb.importFail")}${e}`);
     }
@@ -144,7 +162,7 @@ export function KnowledgeManager() {
           : results
               .map(
                 (r, i) =>
-                  `[${i + 1}] ${r.file_name} (relevance ${Math.round(r.score * 100)}%)\n${r.content}`
+                  `[${i + 1}] ${r.file_name} (${formatRagScore(r.score, r.score_kind)})\n${r.content}`
               )
               .join("\n\n---\n\n")
       );
@@ -317,8 +335,16 @@ export function KnowledgeManager() {
                   onClick={() => {
                     const bid = kb.activeBaseId;
                     if (!bid) return;
-                    kb.deleteFile(bid, f.name);
-                    kb.loadFiles(bid);
+                    // T-016：store.deleteFile 先删 sled chunks 再删磁盘文件；
+                    // 失败时必须给可见反馈并保留列表项，不能假装已删除。
+                    kb.deleteFile(bid, f.name)
+                      .then(() => kb.loadFiles(bid))
+                      .catch((e: unknown) => {
+                        showToast("error", `删除文件失败：${String(e)}`);
+                        logDiag(
+                          `rag_delete_document failed: ${String(e)} kb=${bid} file=${f.name}`
+                        );
+                      });
                   }}
                   className="p-0.5 rounded hover:bg-destructive/20 text-destructive"
                 >

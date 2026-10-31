@@ -1,22 +1,29 @@
 import { Component, type ReactNode } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { t } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
+
+type Translate = ReturnType<typeof useT>;
 
 interface Props {
   children: ReactNode;
+}
+interface InnerProps extends Props {
+  /** 来自 useT()，随 locale 变化 —— 类组件内部不能直接调 hook */
+  t: Translate;
 }
 interface State {
   hasError: boolean;
   error: string;
 }
 
-export class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundaryInner extends Component<InnerProps, State> {
   override state: State = { hasError: false, error: "" };
   static getDerivedStateFromError(e: Error): State {
     return { hasError: true, error: e.message };
   }
 
   override render() {
+    const { t } = this.props;
     if (this.state.hasError) {
       return (
         <div className="flex items-center justify-center h-screen bg-background">
@@ -39,4 +46,13 @@ export class ErrorBoundary extends Component<Props, State> {
     }
     return this.props.children;
   }
+}
+
+/**
+ * 错误边界。T-138：类组件里不能用 hook，裸 t() 也不会随 locale 重渲染，
+ * 所以由这个函数组件用 useT() 订阅语言，再把 t 传给真正的边界。
+ */
+export function ErrorBoundary({ children }: Props) {
+  const t = useT();
+  return <ErrorBoundaryInner t={t}>{children}</ErrorBoundaryInner>;
 }
