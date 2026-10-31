@@ -538,7 +538,7 @@ $ npm view @typescript-eslint/parser@8.70.0 peerDependencies
 
 ### 7.9 审查修复轮（2026-09-20，实测驱动）
 
-> 由一次外部审查驱动（报告在仓库外 `D:/1233344/my-chat-audit/REVIEW-my-chat.md`），分六批实施，
+> 由一次外部审查驱动（报告在仓库外，未入库），分六批实施，
 > **每批都过 `node scripts/gate.mjs all` 才进入下一批**。本节数字全部当场实测。
 
 **批次与读数**

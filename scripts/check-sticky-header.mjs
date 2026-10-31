@@ -2,7 +2,9 @@
 // 为什么不用 vitest 当判据：负对照证明「跑一个无关测试文件」会被字面壳满足（判据空转）。
 // 这里断言的是**本步产物的真实内容**：吸顶类名、返回按钮、三个面板都接入。
 import { readFileSync, existsSync } from "node:fs";
-const R = "D:/1233344/my-chat/src/components/";
+import { dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+const R = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "components") + sep;
 const red = [];
 
 const ph = R + "settings/PanelHeader.tsx";
