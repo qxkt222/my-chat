@@ -24,3 +24,5 @@ src/.vitest-report.json
 .gate-tmp/
 # 覆盖率报告（vitest --coverage 产物，2026-09-25 接线时补）
 coverage/
+# 审查过程截图（临时产物，不入库）
+audit-shot-*.png

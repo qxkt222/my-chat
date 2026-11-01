@@ -18,6 +18,6 @@ Write-Host "完成！运行以下命令验证：" -ForegroundColor Green
 Write-Host "  $env:USERPROFILE\.cargo\bin\rustc.exe --version"
 Write-Host "  $env:USERPROFILE\.cargo\bin\cargo.exe --version"
 Write-Host ""
-Write-Host "然后回到项目："
+Write-Host "然后回到项目根目录："
 Write-Host "  cd <项目根>\src-tauri"
 Write-Host "  cargo build"
