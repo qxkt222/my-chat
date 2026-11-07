@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.5.5",
+    "@tauri-apps/plugin-opener": "^2.7.2",
     "clsx": "^2.1.0",
     "lucide-react": "^1.47.0",
     "marked": "^18.0.13",
