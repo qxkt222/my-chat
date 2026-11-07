@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # 代码没变也每天跑一次，抓上游依赖/环境漂移——push CI 抓不到这类问题。
+  # UTC 20:00 = 北京次日 04:00。
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 前端：lint / typecheck / 单元测试 ────────────────────────────────
+  # jsdom 环境，不碰 Tauri，Linux runner 足够。
+  frontend:
+    name: 前端（lint / typecheck / test）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 与 scripts/gate.mjs 的 lint 闸门一致：告警也算失败，否则是假绿。
+      - name: ESLint（0 警告）
+        run: npx eslint "src/**/*.{ts,tsx}" --max-warnings 0
+
+      - name: TypeScript 类型检查
+        run: npx tsc --noEmit
+
+      - name: Vitest
+        run: npm test
+
+  # ── Rust：fmt / clippy / 单元测试 ───────────────────────────────────
+  # 只跑 Windows：Tauri 的主要目标平台，WebView2 由 runner 预装。
+  rust:
+    name: Rust（fmt / clippy / test）
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # tauri-build 的 build.rs 会检查 tauri.conf.json 的 frontendDist（../dist）
+      # 是否存在，所以 cargo check/test 之前必须先构建前端。
+      - name: 构建前端（生成 dist）
+        run: npm run build
+
+      - name: rustfmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      # 与 gate.mjs 的 rust-clippy 一致：pedantic 警告即失败。
+      - name: clippy（警告即失败）
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
