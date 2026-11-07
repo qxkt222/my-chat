@@ -37,6 +37,9 @@ missing_panics_doc = "allow"
 needless_pass_by_value = "allow"
 # 文档引用风格(引号/反引号)对注释不强制
 doc_link_with_quotes = "allow"
+# 2026-11 新版 clippy 新增:测试里的空值断言、常量分块写法沿用既有风格
+assert_is_empty = "allow"
+chunks_exact_to_as_chunks = "allow"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
